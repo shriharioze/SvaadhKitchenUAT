@@ -7935,7 +7935,7 @@
         sLoading(false);
         if (data.success) {
           S.isPlaced = true;
-          showSuccess(data.submissionId || gatewayOrderId);
+          showSuccess(gatewayOrderId);
         } else {
           throw new Error(data.error || "Order submission failed after payment.");
         }
