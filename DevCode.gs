@@ -132,7 +132,7 @@ const ORDERS_HEADERS = [
   "Special_Notes_Kitchen","Special_Notes_Delivery",
   "Food_Subtotal","Delivery_Charge","Discount_Amount","Review_Discount","Net_Total",
   "Payment_Method","Payment_Status","Payment_Freq","First_Time","Source","Refund_Preference", "Packed", "Delivery_Point",
-  "Inflation_Surcharge", "Loyalty_Discount", "Wallet_Credit"
+  "Inflation_Surcharge", "Loyalty_Discount", "Wallet_Credit", "Gateway_Order_ID"
 ];
 
 const ITEM_COL_MAP = {
@@ -1211,6 +1211,31 @@ function submitOrder(body) {
     return String(d).trim().substring(0, 10);
   };
 
+  // ── Gateway Order ID idempotency check (hard block, no time window) ──────────
+  // If this HDFC Order ID was already processed (regardless of when), return the
+  // existing Submission IDs immediately — do NOT write any new rows.
+  // This prevents duplicate orders when the return URL fires twice (e.g. back button,
+  // browser refresh, or HDFC retrying the redirect).
+  const gatewayOrderId = String(body.gateway_order_id || "").trim();
+  if (gatewayOrderId) {
+    const lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(10000);
+      const freshRows = getAllRows(ordersWs); // re-read inside lock to prevent race
+      const existingForGateway = freshRows.filter(r =>
+        String(r.Gateway_Order_ID || "").trim() === gatewayOrderId
+      );
+      if (existingForGateway.length > 0) {
+        const existingSids = [...new Set(existingForGateway.map(r => String(r.Submission_ID || "")))].filter(Boolean);
+        console.log("Gateway order already processed: " + gatewayOrderId + " → " + existingSids.join(", "));
+        return { success: true, submissionId: existingSids[0], submissionIds: existingSids, already_processed: true };
+      }
+    } finally {
+      lock.releaseLock();
+    }
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   for (const order of orders) {
     const orderDate = order.date;
     const is6thDay = (virtualStreakCount === 5); // Hits 6 on this day
@@ -1444,6 +1469,7 @@ function submitOrder(body) {
       set("Payment_Freq",        payFreq);
       set("First_Time",          firstTime);
       set("Source",              "WebApp");
+      if (gatewayOrderId) set("Gateway_Order_ID", gatewayOrderId);
 
       // Fill individual item columns
       if (mealType === "Breakfast") {
