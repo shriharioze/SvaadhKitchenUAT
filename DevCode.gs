@@ -46,7 +46,7 @@ const HDFC_WEBHOOK_USERNAME = SP.getProperty("HDFC_WEBHOOK_USERNAME") || "";
 const HDFC_WEBHOOK_PASSWORD = SP.getProperty("HDFC_WEBHOOK_PASSWORD") || "";
 const HDFC_ENV              = SP.getProperty("HDFC_ENV")              || "test";
 const HDFC_RETURN_URL       = SP.getProperty("HDFC_RETURN_URL")       || "";
-const HDFC_ORDER_PAGE_URL   = SP.getProperty("HDFC_ORDER_PAGE_URL")   || "https://svaadhkitchen.in/order.html";
+const HDFC_ORDER_PAGE_URL   = SP.getProperty("HDFC_ORDER_PAGE_URL")   || "https://shriharioze.github.io/SvaadhKitchenUAT/order.html";
 const HDFC_BASE_URL         = HDFC_ENV === "live"
   ? (SP.getProperty("HDFC_LIVE_URL") || "https://smartgateway.hdfcbank.com")
   : (SP.getProperty("HDFC_TEST_URL") || "https://smartgateway-uat.hdfcbank.com");
