@@ -281,22 +281,7 @@ function doGet(e) {
       .join("&");
     const redirectUrl = HDFC_ORDER_PAGE_URL + "?" + params;
     return HtmlService.createHtmlOutput(
-      '<!DOCTYPE html><html><head></head>' +
-      '<body onload="redir()" style="font-family:system-ui;text-align:center;padding:60px 20px;">' +
-      '<script>' +
-      '  function redir(){' +
-      '    var u = ' + JSON.stringify(redirectUrl) + ';' +
-      '    try { window.top.location.href = u; }' +
-      '    catch(_e1) {' +
-      '      try { window.open(u, "_top"); }' +
-      '      catch(_e2) { window.location.href = u; }' +
-      '    }' +
-      '  }' +
-      '  redir();' +
-      '</script>' +
-      '<p style="color:#666;">Redirecting to your order page…</p>' +
-      '<p><a href="' + redirectUrl + '" target="_top" style="display:inline-block;padding:12px 24px;background:#0891b2;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Continue to Order →</a></p>' +
-      '</body></html>'
+      _hdfcReturnRedirectHtml(redirectUrl)
     );
   }
   // ─────────────────────────────────────────────────────────────
@@ -438,6 +423,56 @@ function doGet(e) {
   }
 }
 
+
+// ════════════════════════════════════════════════════════════════════════
+// HDFC return-URL → GitHub Pages redirect HTML
+// ════════════════════════════════════════════════════════════════════════
+// Apps Script HtmlService output is rendered inside a sandboxed iframe at
+// script.googleusercontent.com (parent at script.google.com). Cross-origin
+// scripted navigation of window.top is silently BLOCKED in some browsers,
+// which left customers stuck on the redirect page until they manually
+// clicked the link. Form auto-submit with target="_top" navigates the
+// outer browser tab reliably even when scripted location.href is blocked.
+function _hdfcReturnRedirectHtml(redirectUrl) {
+  // Split URL so we can submit query params via GET form
+  const idx = redirectUrl.indexOf("?");
+  const action = idx === -1 ? redirectUrl : redirectUrl.substring(0, idx);
+  const queryString = idx === -1 ? "" : redirectUrl.substring(idx + 1);
+  let inputs = "";
+  if (queryString) {
+    queryString.split("&").forEach(function(pair) {
+      const eq = pair.indexOf("=");
+      const k = eq === -1 ? pair : pair.substring(0, eq);
+      const v = eq === -1 ? ""   : decodeURIComponent(pair.substring(eq + 1).replace(/\+/g, " "));
+      // Re-encode safely for HTML attribute
+      const safeK = String(k).replace(/"/g, "&quot;");
+      const safeV = String(v).replace(/"/g, "&quot;");
+      inputs += '<input type="hidden" name="' + safeK + '" value="' + safeV + '">';
+    });
+  }
+  return '<!DOCTYPE html><html><head><title>Redirecting…</title></head>' +
+         '<body onload="document.getElementById(\'r\').submit();" ' +
+              'style="font-family:system-ui;text-align:center;padding:60px 20px;background:#fef9f6;">' +
+         '<form id="r" action="' + action + '" method="GET" target="_top">' + inputs + '</form>' +
+         '<script>' +
+         '  // Belt-and-suspenders: also try direct top-level navigation' +
+         '  setTimeout(function(){' +
+         '    try { document.getElementById("r").submit(); } catch(_){}' +
+         '    try { window.top.location.href = ' + JSON.stringify(redirectUrl) + '; } catch(_){}' +
+         '  }, 300);' +
+         '</script>' +
+         '<div style="font-size:1.1rem;color:#0f766e;font-weight:700;margin-bottom:8px;">Returning to Svaadh Kitchen…</div>' +
+         '<p style="color:#666;font-size:0.9rem;">Confirming your payment</p>' +
+         '<p style="margin-top:24px;">' +
+         '  <a href="' + redirectUrl + '" target="_top" ' +
+         '     style="display:inline-block;padding:12px 24px;background:#0891b2;color:#fff;' +
+                    'text-decoration:none;border-radius:8px;font-weight:600;">' +
+         '    Continue to Order →' +
+         '  </a>' +
+         '</p>' +
+         '</body></html>';
+}
+
 function doPost(e) {
   try {
     // ── HDFC Return URL Handler ────────────────────────────────
@@ -469,22 +504,7 @@ function doPost(e) {
           .join("&");
         const redirectUrl = HDFC_ORDER_PAGE_URL + "?" + params;
         return HtmlService.createHtmlOutput(
-          `<!DOCTYPE html><html><head></head>` +
-          `<body onload="redir()" style="font-family:system-ui;text-align:center;padding:60px 20px;">` +
-          `<script>` +
-          `  function redir(){` +
-          `    var u = ${JSON.stringify(redirectUrl)};` +
-          `    try { window.top.location.href = u; }` +
-          `    catch(_e1) {` +
-          `      try { window.open(u, "_top"); }` +
-          `      catch(_e2) { window.location.href = u; }` +
-          `    }` +
-          `  }` +
-          `  redir();` +
-          `</script>` +
-          `<p style="color:#666;">Redirecting to your order page…</p>` +
-          `<p><a href="${redirectUrl}" target="_top" style="display:inline-block;padding:12px 24px;background:#0891b2;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Continue to Order →</a></p>` +
-          `</body></html>`
+          _hdfcReturnRedirectHtml(redirectUrl)
         );
       }
     }
@@ -5619,7 +5639,8 @@ function _computeAuthoritativeTotal(savedOrders, phone) {
 
   const DELIVERY = 10;
   const ss = getSpreadsheet();
-  const freeAreaNames = (getAreas() || []).filter(function(a){return a.free;}).map(function(a){return a.name;});
+  const allAreas      = getAreas() || [];
+  const freeAreaNames = allAreas.filter(function(a){return a.free;}).map(function(a){return a.name;});
 
   // ── Customer profile lookup (Fee_Exempt, Review_Promo_Count) ──────────
   const custWs   = getOrCreateTab(ss, TAB_CUSTOMERS, CUSTOMERS_HEADERS);
@@ -5632,6 +5653,26 @@ function _computeAuthoritativeTotal(savedOrders, phone) {
     const raw = cRow.Review_Promo_Count;
     if (raw !== "" && raw !== undefined && !isNaN(raw)) promoCount = Number(raw);
   }
+
+  // ── Customer's address-history allowlist (anti-area-tamper) ──────────
+  // To prevent attackers from tampering meal.area to a free-area name in
+  // their request and getting fraudulent free delivery, server only honors
+  // an area as "free" if it is one the customer has ACTUALLY ordered to
+  // before, OR is their saved profile area, OR is "Self Pickup".
+  // Unknown / new areas → treated as non-free (delivery applies).
+  // First-time customers (no order history): profile area accepted.
+  const orderHistRows = getAllRows(getOrCreateTab(ss, TAB_ORDERS, ORDERS_HEADERS));
+  const customerKnownAreas = new Set();
+  customerKnownAreas.add("Self Pickup");
+  if (cRow && cRow.Area) customerKnownAreas.add(String(cRow.Area).trim());
+  orderHistRows.forEach(function(r) {
+    if (_normalizePhone(r.Phone) !== phoneStr) return;
+    const a = String(r.Area || "").trim();
+    if (a) customerKnownAreas.add(a);
+  });
+  // For brand-new customers (no row in SK_Customers AND no order history),
+  // accept whatever area they specify (legitimate first order).
+  const isBrandNewCustomer = (!cRow && customerKnownAreas.size === 1); // only "Self Pickup"
 
   // ── Existing same-day orders (for combined totals + retroactive credit) ──
   const dateList = Object.keys(savedOrders).sort();
@@ -5722,7 +5763,17 @@ function _computeAuthoritativeTotal(savedOrders, phone) {
       const sub      = mealSubs[mealType].sub;
       const mealArea = mealSubs[mealType].area || "";
       const isPickup = mealArea.toLowerCase().indexOf("pickup") !== -1;
-      const isFreeArea = freeAreaNames.indexOf(mealArea) !== -1;
+
+      // Strict area-trust gate: only honor "free area" exemption if the
+      // customer has demonstrably used this area before (order history OR
+      // profile area), OR is a brand-new customer placing their first order.
+      // Otherwise treat as non-free → delivery charged. Logs tamper attempts.
+      const areaIsTrusted = isBrandNewCustomer || customerKnownAreas.has(mealArea);
+      const isFreeArea = areaIsTrusted && (freeAreaNames.indexOf(mealArea) !== -1);
+      if (!areaIsTrusted && mealArea && !isPickup) {
+        console.warn("⚠️ AREA NOT IN CUSTOMER HISTORY — orderId-area=" + mealArea
+          + " phone=" + phoneStr + " — treating as non-free (delivery applies).");
+      }
 
       const prevMealSub     = (existingDateInfo[mealType] || {}).subtotal || 0;
       const combinedMealSub = sub + prevMealSub;
