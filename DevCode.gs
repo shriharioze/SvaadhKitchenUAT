@@ -46,7 +46,15 @@ const HDFC_WEBHOOK_USERNAME = SP.getProperty("HDFC_WEBHOOK_USERNAME") || "";
 const HDFC_WEBHOOK_PASSWORD = SP.getProperty("HDFC_WEBHOOK_PASSWORD") || "";
 const HDFC_ENV              = SP.getProperty("HDFC_ENV")              || "test";
 const HDFC_RETURN_URL       = SP.getProperty("HDFC_RETURN_URL")       || "";
-const HDFC_ORDER_PAGE_URL   = SP.getProperty("HDFC_ORDER_PAGE_URL")   || "https://shriharioze.github.io/SvaadhKitchenUAT/order.html";
+// HDFC_ORDER_PAGE_URL: where the customer's browser lands AFTER payment.
+// Must be the GitHub Pages order.html (not the Apps Script /exec URL — that
+// would create a redirect loop or render a blank page). If the Script
+// Property accidentally points to script.google.com, ignore it and use
+// the canonical fallback.
+const _HDFC_OPU_RAW = SP.getProperty("HDFC_ORDER_PAGE_URL") || "";
+const HDFC_ORDER_PAGE_URL = (_HDFC_OPU_RAW && _HDFC_OPU_RAW.indexOf("script.google.com") === -1)
+  ? _HDFC_OPU_RAW
+  : "https://shriharioze.github.io/SvaadhKitchenUAT/order.html";
 const HDFC_BASE_URL         = HDFC_ENV === "live"
   ? (SP.getProperty("HDFC_LIVE_URL") || "https://smartgateway.hdfcbank.com")
   : (SP.getProperty("HDFC_TEST_URL") || "https://smartgateway-uat.hdfcbank.com");
@@ -274,8 +282,8 @@ function doGet(e) {
     const redirectUrl = HDFC_ORDER_PAGE_URL + "?" + params;
     return HtmlService.createHtmlOutput(
       '<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=' + redirectUrl + '"></head>' +
-      '<body><script>window.location.replace(' + JSON.stringify(redirectUrl) + ');</script>' +
-      '<p>Redirecting... <a href="' + redirectUrl + '">Click here if not redirected</a></p></body></html>'
+      '<body><script>try{window.top.location.replace(' + JSON.stringify(redirectUrl) + ');}catch(_){window.location.replace(' + JSON.stringify(redirectUrl) + ');}</script>' +
+      '<p>Redirecting... <a href="' + redirectUrl + '" target="_top">Click here if not redirected</a></p></body></html>'
     );
   }
   // ─────────────────────────────────────────────────────────────
@@ -449,8 +457,8 @@ function doPost(e) {
         const redirectUrl = HDFC_ORDER_PAGE_URL + "?" + params;
         return HtmlService.createHtmlOutput(
           `<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=${redirectUrl}"></head>` +
-          `<body><script>window.location.replace(${JSON.stringify(redirectUrl)});</script>` +
-          `<p>Redirecting... <a href="${redirectUrl}">Click here if not redirected</a></p></body></html>`
+          `<body><script>try{window.top.location.replace(${JSON.stringify(redirectUrl)});}catch(_){window.location.replace(${JSON.stringify(redirectUrl)});}</script>` +
+          `<p>Redirecting... <a href="${redirectUrl}" target="_top">Click here if not redirected</a></p></body></html>`
         );
       }
     }
