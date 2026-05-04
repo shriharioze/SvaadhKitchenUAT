@@ -5682,7 +5682,8 @@ function _computeAuthoritativeTotal(savedOrders, phone) {
       virtualPastSurcharge += currentDaySurcharge;
     }
 
-    // Per-meal compute (mirror submitOrder's inner loop)
+    // Per-meal compute (mirror submitOrder's inner loop) — accumulate at DAY level
+    let dayNet = 0;
     Object.keys(mealSubs).forEach(function(mealType) {
       const sub      = mealSubs[mealType].sub;
       const mealArea = mealSubs[mealType].area || "";
@@ -5726,8 +5727,13 @@ function _computeAuthoritativeTotal(savedOrders, phone) {
       }
 
       const netTotal = Math.round(sub + delCharge + smallOrderFee + inflationSurcharge - discAmt - mealCredit - reviewDiscount);
-      grand += Math.max(0, netTotal);
+      dayNet += netTotal;
     });
+
+    // Clamp at DAY level (not per meal) to mirror frontend behavior on 6th-day
+    // streak waiver — surplus on one meal can offset another meal's net the
+    // same way the frontend bill builder shows it.
+    grand += Math.max(0, dayNet);
   });
 
   return Math.round(grand);
