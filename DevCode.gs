@@ -5536,29 +5536,37 @@ function submitManualOrder(body) {
 /**
  * STEP 1 — Called by order.html when customer chooses to pay via gateway.
 /**
- * SERVER-SIDE ITEM-TOTAL FLOOR (HDFC UAT — Amount Tampering fix)
+ * SERVER-SIDE AUTHORITATIVE PRICING (HDFC UAT — Amount Tampering fix)
  *
- * Computes the minimum authoritative amount for a saved cart by summing
- * Σ(qty × menu_price) for every item. This is used as a TAMPER FLOOR:
- * the gateway must charge at least this much. Delivery fees, day-tier
- * discounts and loyalty surcharge are deliberately NOT computed here —
- * they are the frontend's responsibility (the only consequence of
- * skipping them is the floor being slightly lower than the displayed
- * total, which is fine: any value at or above the floor is safe).
+ * Recomputes the order grand total entirely server-side from the saved cart,
+ * using the SAME pricing rules that submitOrder() applies when writing to
+ * SK_Orders. This is the single source of truth for the gateway charge.
  *
- * Used as a "server-trusted minimum" in hdfc_createSession and
- * hdfc_verifyReturnPayload:
- *   - createSession: charge MAX(client_amount, item_floor)
- *   - verifyReturn:  reject if charged_amount < item_floor − ₹1
+ * If you change pricing logic in submitOrder() (lines ~1239–1353),
+ * MIRROR THE CHANGE HERE — both sites must stay in lock-step.
  *
- * @param {Object} savedOrders  S.orders snapshot { date: { Meal: { items, ... } } }
- * @returns {Number}            Authoritative item-total floor (rupees)
+ * Pricing factors covered:
+ *   - Item subtotals (Σ qty × authoritative menu price)
+ *   - Day-tier discount (5% ≥ ₹300, 7.5% ≥ ₹450, on combined day total)
+ *   - Per-area free delivery (SK_Areas.free)
+ *   - VIP customers / Fee_Exempt = Yes → no delivery, no small-order fee
+ *   - Self-pickup → no delivery, no small-order fee
+ *   - Day-cumulative threshold for free delivery (₹100 single-meal, ₹150 multi)
+ *   - Small-order fee ₹10 on Lunch/Dinner < ₹50
+ *   - Retroactive credit for previously-paid same-day delivery/small-fee
+ *     when today crosses the day-free threshold
+ *   - Inflation surcharge ceil(sub/20)
+ *   - 6th-day loyalty waiver (waives current + refunds past 5 days' surcharges)
+ *   - Review promo (10% off per meal, decrements promo count in-memory)
+ *
+ * @param {Object} savedOrders  S.orders snapshot { date: { Meal: { items: {colKey:qty}, area, ... } } }
+ * @param {String} phone        Customer phone (used to fetch profile, day-totals, streak)
+ * @returns {Number}            Authoritative grand total (rupees)
  */
-function _serverComputeItemTotal(savedOrders) {
+function _computeAuthoritativeTotal(savedOrders, phone) {
   if (!savedOrders || typeof savedOrders !== "object") return 0;
 
-  // Static lunch/dinner price map — mirror of frontend FIXED_MEAL_ITEMS.
-  // Source-of-truth: docs/order.html → FIXED_MEAL_ITEMS. Keep in sync.
+  // ── Authoritative price lookup (mirror of frontend FIXED_MEAL_ITEMS) ──
   const LD_PRICE = {
     "Chapati": 9, "Without Oil Chapati": 8, "Phulka": 7, "Ghee Phulka": 10,
     "Jowar Bhakri": 20, "Bajra Bhakri": 20,
@@ -5566,7 +5574,6 @@ function _serverComputeItemTotal(savedOrders) {
     "Curry Sabji Mini (100ml)": 22, "Curry Sabji Full (250ml)": 45,
     "Dal (200ml)": 22, "Rice (100g)": 12, "Salad (40g)": 7, "Curd (50g)": 12
   };
-
   function priceOf(colKey, meal, menu) {
     if (meal === "Breakfast") {
       if (colKey === "B_CURD") return 12;
@@ -5576,27 +5583,154 @@ function _serverComputeItemTotal(savedOrders) {
     return Number(LD_PRICE[colKey] || 0);
   }
 
+  const DELIVERY = 10;
+  const ss = getSpreadsheet();
+  const freeAreaNames = (getAreas() || []).filter(function(a){return a.free;}).map(function(a){return a.name;});
+
+  // ── Customer profile lookup (Fee_Exempt, Review_Promo_Count) ──────────
+  const custWs   = getOrCreateTab(ss, TAB_CUSTOMERS, CUSTOMERS_HEADERS);
+  const cRows    = getAllRows(custWs);
+  const phoneStr = _normalizePhone(phone || "");
+  const cRow     = cRows.find(function(r){ return _normalizePhone(r.Phone) === phoneStr; }) || null;
+  const isFeeExempt = !!(cRow && (cRow.Fee_Exempt === "Yes" || cRow.Fee_Exempt === true));
+  let promoCount = null;
+  if (cRow) {
+    const raw = cRow.Review_Promo_Count;
+    if (raw !== "" && raw !== undefined && !isNaN(raw)) promoCount = Number(raw);
+  }
+
+  // ── Existing same-day orders (for combined totals + retroactive credit) ──
+  const dateList = Object.keys(savedOrders).sort();
+  if (!dateList.length) return 0;
+  const existingDayTotals = (getDayTotalsForDates(phoneStr, dateList.join(",")).dayTotals) || {};
+
+  // ── Loyalty streak (for 6th-day waiver) ──────────────────────────────
+  const initialStreakInfo  = _calculateLoyaltyStreak(phoneStr);
+  let virtualStreakCount   = initialStreakInfo.streak || 0;
+  let virtualPastSurcharge = initialStreakInfo.pastSurcharge || 0;
+
+  // ── Menu cache ──────────────────────────────────────────────────────
   const menuCache = {};
-  let total = 0;
+  function getMenuCached(d) {
+    if (!menuCache[d]) menuCache[d] = getMenu(d);
+    return menuCache[d];
+  }
 
-  Object.keys(savedOrders).forEach(function(date) {
-    const day = savedOrders[date] || {};
-    if (!menuCache[date]) menuCache[date] = getMenu(date);
-    const menu = menuCache[date];
+  let grand = 0;
 
-    ["Breakfast", "Lunch", "Dinner"].forEach(function(meal) {
+  // Mirror submitOrder lines 1239–1353
+  dateList.forEach(function(orderDate) {
+    const day = savedOrders[orderDate] || {};
+    const menu = getMenuCached(orderDate);
+    const existingDateInfo = existingDayTotals[orderDate] || {};
+
+    const is6thDay = (virtualStreakCount === 5);
+
+    // Compute per-meal subtotals from authoritative prices first (replaces client-supplied subtotals)
+    const mealSubs = {};   // { Breakfast: { sub, area }, ... }
+    ["Breakfast","Lunch","Dinner"].forEach(function(meal) {
       const m = day[meal];
       if (!m || !m.items) return;
+      let sub = 0;
       Object.entries(m.items).forEach(function(pair) {
         const colKey = pair[0];
         const qty    = Number(pair[1]) || 0;
         if (qty <= 0) return;
-        total += priceOf(colKey, meal, menu) * qty;
+        sub += priceOf(colKey, meal, menu) * qty;
       });
+      if (sub > 0) {
+        mealSubs[meal] = { sub: sub, area: m.area || "" };
+      }
+    });
+
+    // Day-level totals (this submission's day food, plus existing same-day orders)
+    const submissionDayFoodTotal = Object.values(mealSubs).reduce(function(s, m){ return s + m.sub; }, 0);
+    const prevDayFoodTotal       = Object.values(existingDateInfo).reduce(function(s, m){ return s + (Number(m.subtotal)||0); }, 0);
+    const combinedDayTotal       = submissionDayFoodTotal + prevDayFoodTotal;
+
+    // Dynamic free-delivery threshold: 1 meal that day → ₹100, else ₹150
+    const mealsThisSubmission = Object.keys(mealSubs);
+    const existingMeals       = Object.keys(existingDateInfo).filter(function(t){ return (Number(existingDateInfo[t].subtotal)||0) > 0; });
+    const totalMealsCount     = Array.from(new Set(mealsThisSubmission.concat(existingMeals))).length;
+    const dynamicFreeThreshold = totalMealsCount <= 1 ? 100 : 150;
+    const isDayFree           = (combinedDayTotal >= dynamicFreeThreshold);
+
+    // Day-tier discount (5%/7.5%) — pro-rated to this submission
+    let discRate = 0;
+    if (combinedDayTotal >= 450)      discRate = 0.075;
+    else if (combinedDayTotal >= 300) discRate = 0.05;
+    const totalDayDiscAmt   = Math.round(combinedDayTotal * discRate);
+    const prevDayDiscAmt    = Object.values(existingDateInfo).reduce(function(s, m){ return s + (Number(m.discount_applied)||0); }, 0);
+    const submissionDateDiscAmt = Math.max(0, totalDayDiscAmt - prevDayDiscAmt);
+
+    function getDisc(sub) {
+      if (is6thDay) {
+        const currentSurcharge = Math.ceil(submissionDayFoodTotal / 20);
+        const totalWaiver = virtualPastSurcharge + currentSurcharge;
+        return submissionDayFoodTotal > 0 ? Math.round(totalWaiver * (sub / submissionDayFoodTotal)) : 0;
+      }
+      return submissionDayFoodTotal > 0 ? Math.round(submissionDateDiscAmt * (sub / submissionDayFoodTotal)) : 0;
+    }
+
+    // Update virtual streak for next iteration
+    const currentDaySurcharge = Math.ceil(submissionDayFoodTotal / 20);
+    if (is6thDay) {
+      virtualStreakCount   = 0;
+      virtualPastSurcharge = 0;
+    } else {
+      virtualStreakCount++;
+      virtualPastSurcharge += currentDaySurcharge;
+    }
+
+    // Per-meal compute (mirror submitOrder's inner loop)
+    Object.keys(mealSubs).forEach(function(mealType) {
+      const sub      = mealSubs[mealType].sub;
+      const mealArea = mealSubs[mealType].area || "";
+      const isPickup = mealArea.toLowerCase().indexOf("pickup") !== -1;
+      const isFreeArea = freeAreaNames.indexOf(mealArea) !== -1;
+
+      const prevMealSub     = (existingDateInfo[mealType] || {}).subtotal || 0;
+      const combinedMealSub = sub + prevMealSub;
+
+      let delCharge = 0;
+      if (!isFeeExempt && !isDayFree && !isPickup && !isFreeArea && sub > 0) {
+        delCharge = DELIVERY;
+      }
+
+      let smallOrderFee = 0;
+      if (!isFeeExempt && !isDayFree && !isPickup && (mealType === "Lunch" || mealType === "Dinner") && sub > 0 && combinedMealSub < 50) {
+        smallOrderFee = 10;
+      }
+
+      // Retroactive credits if today crossed the day-free threshold
+      let dateDeliveryCredit = 0, dateSmallFeeCredit = 0;
+      if (isDayFree) {
+        Object.keys(existingDateInfo).forEach(function(mt) {
+          dateDeliveryCredit += (Number(existingDateInfo[mt].delivery_charged) || 0);
+          dateSmallFeeCredit += (Number(existingDateInfo[mt].small_fee_charged) || 0);
+        });
+      }
+      const totalDateCredit = dateDeliveryCredit + dateSmallFeeCredit;
+      const mealCredit = submissionDayFoodTotal > 0
+        ? Math.round(totalDateCredit * (sub / submissionDayFoodTotal))
+        : 0;
+
+      const discAmt = getDisc(sub);
+      const inflationSurcharge = Math.ceil(sub / 20);
+
+      // Review promo (10% off per meal; decrement in-memory only)
+      let reviewDiscount = 0;
+      if (typeof promoCount === "number" && !isNaN(promoCount) && promoCount > 0 && sub > 0) {
+        reviewDiscount = Math.round(sub * 0.10);
+        promoCount--;
+      }
+
+      const netTotal = Math.round(sub + delCharge + smallOrderFee + inflationSurcharge - discAmt - mealCredit - reviewDiscount);
+      grand += Math.max(0, netTotal);
     });
   });
 
-  return Math.round(total);
+  return Math.round(grand);
 }
 
 
@@ -5644,27 +5778,24 @@ function hdfc_createSession(body) {
     return { error: "Pending order not found. Please retry checkout." };
   }
 
-  const itemFloor   = _serverComputeItemTotal(pendingEntry.orders);
-  const clientAmount = Number(body.amount || 0);
-  if (itemFloor <= 0) {
+  const authoritativeAmount = _computeAuthoritativeTotal(pendingEntry.orders, pendingEntry.phone || phone);
+  const clientAmount        = Number(body.amount || 0);
+  if (authoritativeAmount <= 0) {
     return { error: "Could not compute order total. Cart may be empty." };
   }
 
-  // The gateway must charge at LEAST the item-total floor. If the client
-  // value is at or above the floor, trust it (it includes legit delivery /
-  // surcharge / discount that we don't reproduce server-side). If the client
-  // value is below the floor, this is a tamper — fall back to the floor.
-  let amountToSend = clientAmount;
-  if (clientAmount < itemFloor - 1) {
-    console.warn("⚠️ AMOUNT TAMPER DETECTED on hdfc_createSession — orderId="
-      + orderId + " phone=" + phone + " client=" + clientAmount
-      + " floor=" + itemFloor + " — overriding to floor.");
-    amountToSend = itemFloor;
+  // Single source of truth: server-computed authoritative total. body.amount is ignored
+  // entirely (only logged for audit). This applies the SAME pricing rules submitOrder uses
+  // when writing to SK_Orders, so the gateway charge always equals what gets recorded.
+  if (Math.abs(authoritativeAmount - clientAmount) > 1) {
+    console.warn("⚠️ AMOUNT MISMATCH on hdfc_createSession — orderId=" + orderId
+      + " phone=" + phone + " client=" + clientAmount + " server=" + authoritativeAmount
+      + " — using SERVER value. (Client value ignored.)");
   }
 
-  // Persist the trusted amount back into the pending entry
+  // Persist the server-trusted amount in the pending entry for audit / refunds.
   try {
-    pendingEntry.amount = amountToSend;
+    pendingEntry.amount = authoritativeAmount;
     const allPending = JSON.parse(props.getProperty("HDFC_PENDING_ORDERS") || "{}");
     allPending[orderId] = pendingEntry;
     props.setProperty("HDFC_PENDING_ORDERS", JSON.stringify(allPending));
@@ -5672,7 +5803,7 @@ function hdfc_createSession(body) {
 
   // HDFC SmartGateway expects amount in RUPEES (empirically confirmed — UAT showed 100x
   // inflation when sending paisa, so SmartGateway/Juspay takes rupees directly, not paisa)
-  amountToSend = Math.round(amountToSend);
+  const amountToSend = Math.round(authoritativeAmount);
 
   const payload = {
     order_id:               orderId,
@@ -5995,27 +6126,26 @@ function hdfc_verifyReturnPayload(body) {
       const pendingRaw   = props.getProperty("HDFC_PENDING_ORDERS") || "{}";
       const pendingEntry = JSON.parse(pendingRaw)[orderId] || null;
       if (pendingEntry && pendingEntry.orders) {
-        const itemFloor = _serverComputeItemTotal(pendingEntry.orders);
-        const charged   = Number(statusCheck.amount || 0);
-        // Reject if charged amount is below the item-total floor (₹1 rounding tolerance).
-        // Charges ABOVE the floor are fine — they may include legitimate delivery/surcharge.
-        if (itemFloor > 0 && charged < itemFloor - 1) {
+        const expected = _computeAuthoritativeTotal(pendingEntry.orders, pendingEntry.phone || "");
+        const charged  = Number(statusCheck.amount || 0);
+        // Reject if charged amount is below the authoritative total (₹1 rounding tolerance).
+        if (expected > 0 && charged < expected - 1) {
           console.error("⚠️ POST-PAYMENT AMOUNT TAMPER DETECTED — orderId=" + orderId
             + " phone=" + (pendingEntry.phone || "")
-            + " charged=" + charged + " floor=" + itemFloor
+            + " charged=" + charged + " expected=" + expected
             + " — REJECTING order placement.");
           return {
             success: false,
             paid:    false,
             error:   "Payment amount mismatch detected (charged ₹" + charged
-                   + " vs minimum order value ₹" + itemFloor + "). The order has NOT been placed. "
+                   + " vs order value ₹" + expected + "). The order has NOT been placed. "
                    + "Please contact support — your payment will be refunded.",
             tamper_detected: true,
             charged_amount:  charged,
-            expected_amount: itemFloor
+            expected_amount: expected
           };
         }
-        console.log("Amount validation OK — orderId=" + orderId + " charged=" + charged + " floor=" + itemFloor);
+        console.log("Amount validation OK — orderId=" + orderId + " charged=" + charged + " expected=" + expected);
       } else {
         console.warn("hdfc_verifyReturnPayload: no pending entry for amount validation — orderId=" + orderId);
       }
