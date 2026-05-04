@@ -5535,34 +5535,12 @@ function submitManualOrder(body) {
 
 /**
  * STEP 1 — Called by order.html when customer chooses to pay via gateway.
-// ════════════════════════════════════════════════════════════════════════
-// SERVER-SIDE AUTHORITATIVE PRICING (HDFC UAT — Amount Tampering fix)
-// ════════════════════════════════════════════════════════════════════════
-// Mirror of frontend FIXED_MEAL_ITEMS prices (lunch/dinner items are static).
-// Source-of-truth: docs/order.html → FIXED_MEAL_ITEMS. Keep in sync.
-const _SERVER_LD_PRICE = {
-  "Chapati": 9, "Without Oil Chapati": 8, "Phulka": 7, "Ghee Phulka": 10,
-  "Jowar Bhakri": 20, "Bajra Bhakri": 20,
-  "Dry Sabji Mini (100ml)": 22, "Dry Sabji Full (250ml)": 45,
-  "Curry Sabji Mini (100ml)": 22, "Curry Sabji Full (250ml)": 45,
-  "Dal (200ml)": 22, "Rice (100g)": 12, "Salad (40g)": 7, "Curd (50g)": 12
-};
-
-// Resolve authoritative price for a single item (colKey) on a given meal/menu.
-function _serverItemPrice(colKey, meal, menu) {
-  if (meal === "Breakfast") {
-    if (colKey === "B_CURD") return 12;  // Breakfast Curd flat price
-    const f = (menu && menu.breakfast || []).find(b => b.name === colKey);
-    return f ? Number(f.price) || 0 : 0;
-  }
-  // Lunch / Dinner — static price map
-  return Number(_SERVER_LD_PRICE[colKey] || 0);
-}
-
 /**
- * Recompute the order grand total entirely server-side from the saved cart,
- * using authoritative menu prices. Used by hdfc_createSession to defeat
- * client-side amount tampering (HDFC UAT finding).
+ * SERVER-SIDE AUTHORITATIVE PRICING (HDFC UAT — Amount Tampering fix)
+ *
+ * Recomputes the order grand total entirely server-side from the saved cart,
+ * using authoritative menu prices. Used by hdfc_createSession and
+ * hdfc_verifyReturnPayload to defeat client-side amount tampering.
  *
  * Logic mirrors submitOrder() pricing:
  *   - item subtotal  = Σ (authoritative_price × qty)
@@ -5570,10 +5548,9 @@ function _serverItemPrice(colKey, meal, menu) {
  *   - delivery       = ₹10 per non-free meal where subtotal < threshold
  *                     (threshold: ₹100 if 1 meal that day, ₹150 if multi-meal)
  *
- * Loyalty surcharge is intentionally NOT applied here — it is small (≤5%)
- * and skipping it can only result in undercharging, never overcharging
- * (no security risk). submitOrder() applies the correct surcharge when
- * the order is finalized in the sheet.
+ * Loyalty surcharge intentionally not applied — it is small (≤5%), and
+ * skipping it can only result in undercharging (no security risk).
+ * submitOrder() applies the correct surcharge when finalizing the row.
  *
  * @param {Object} savedOrders  S.orders snapshot { date: { Breakfast/Lunch/Dinner: { items, area, ... } } }
  * @param {Object} profile      Customer profile (unused for now, reserved)
@@ -5582,7 +5559,27 @@ function _serverItemPrice(colKey, meal, menu) {
 function _serverComputeAmountFromCart(savedOrders, profile) {
   if (!savedOrders || typeof savedOrders !== "object") return 0;
 
-  const freeAreas = (getAreas() || []).filter(a => a.free).map(a => a.name);
+  // Static lunch/dinner price map — mirror of frontend FIXED_MEAL_ITEMS.
+  // Source-of-truth: docs/order.html → FIXED_MEAL_ITEMS. Keep in sync.
+  const LD_PRICE = {
+    "Chapati": 9, "Without Oil Chapati": 8, "Phulka": 7, "Ghee Phulka": 10,
+    "Jowar Bhakri": 20, "Bajra Bhakri": 20,
+    "Dry Sabji Mini (100ml)": 22, "Dry Sabji Full (250ml)": 45,
+    "Curry Sabji Mini (100ml)": 22, "Curry Sabji Full (250ml)": 45,
+    "Dal (200ml)": 22, "Rice (100g)": 12, "Salad (40g)": 7, "Curd (50g)": 12
+  };
+
+  // Inline price lookup — breakfast from menu, lunch/dinner from static map
+  function priceOf(colKey, meal, menu) {
+    if (meal === "Breakfast") {
+      if (colKey === "B_CURD") return 12;
+      const f = (menu && menu.breakfast || []).find(function(b){ return b.name === colKey; });
+      return f ? Number(f.price) || 0 : 0;
+    }
+    return Number(LD_PRICE[colKey] || 0);
+  }
+
+  const freeAreas = (getAreas() || []).filter(function(a){ return a.free; }).map(function(a){ return a.name; });
   const DELIVERY  = 10;
   const menuCache = {};
   let grand = 0;
@@ -5603,7 +5600,7 @@ function _serverComputeAmountFromCart(savedOrders, profile) {
         const colKey = pair[0];
         const qty    = Number(pair[1]) || 0;
         if (qty <= 0) return;
-        sub += _serverItemPrice(colKey, meal, menu) * qty;
+        sub += priceOf(colKey, meal, menu) * qty;
       });
       if (sub > 0) {
         mealsInfo[meal] = { subtotal: sub, area: m.area || "" };
@@ -5611,7 +5608,7 @@ function _serverComputeAmountFromCart(savedOrders, profile) {
       }
     });
 
-    // Day-tier discount (mirror submitOrder logic)
+    // Day-tier discount
     let discRate = 0;
     if (dayFood >= 450)      discRate = 0.075;
     else if (dayFood >= 300) discRate = 0.05;
