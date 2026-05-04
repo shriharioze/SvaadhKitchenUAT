@@ -5996,20 +5996,59 @@ function hdfc_verifyReturnPayload(body) {
   }
 
   // ── Step 2: Status API verification (authoritative) ──────────
-  // Always call if signature check didn't pass. Even if it did pass,
-  // Status API gives us the real txn_id and confirmed status.
+  // Always call Status API — it gives us the real txn_id, confirmed status,
+  // AND the actual charged amount (needed for post-payment tamper check).
+  const statusCheck = hdfc_getOrderStatus(orderId);
   var statusConfirmed = (status === "CHARGED" || status === "SUCCESS");
-  if (!signatureOk) {
-    const statusCheck = hdfc_getOrderStatus(orderId);
-    if (statusCheck.confirmed) {
-      statusConfirmed = true;
-      console.log("HDFC return: Status API confirmed CHARGED for " + orderId);
-    } else {
-      console.warn("HDFC return: Status API returned '" + statusCheck.status + "' for " + orderId);
-      // Only reject if BOTH signature AND Status API fail
-      if (!statusConfirmed) {
-        return { error: "Payment could not be verified. Status: " + statusCheck.status, paid: false };
+  if (statusCheck.confirmed) {
+    statusConfirmed = true;
+    console.log("HDFC return: Status API confirmed CHARGED for " + orderId + " amount=" + statusCheck.amount);
+  } else if (!signatureOk) {
+    console.warn("HDFC return: Status API returned '" + statusCheck.status + "' for " + orderId);
+    if (!statusConfirmed) {
+      return { error: "Payment could not be verified. Status: " + statusCheck.status, paid: false };
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // SECURITY (HDFC UAT — Defense-in-depth post-payment amount check):
+  // Even if hdfc_createSession was somehow bypassed (e.g., direct Juspay
+  // dashboard, undeployed code, future bug), reject the order here if the
+  // amount actually charged at the gateway is less than the authoritative
+  // server-computed cart total. This guarantees no order is ever written
+  // for an underpaid amount.
+  // ────────────────────────────────────────────────────────────────────────
+  if (statusConfirmed && statusCheck.amount > 0) {
+    try {
+      const props        = PropertiesService.getScriptProperties();
+      const pendingRaw   = props.getProperty("HDFC_PENDING_ORDERS") || "{}";
+      const pendingEntry = JSON.parse(pendingRaw)[orderId] || null;
+      if (pendingEntry && pendingEntry.orders) {
+        const expected = _serverComputeAmountFromCart(pendingEntry.orders, pendingEntry.profile);
+        const charged  = Number(statusCheck.amount || 0);
+        // Allow ₹1 tolerance (rounding); reject anything more
+        if (expected > 0 && charged < expected - 1) {
+          console.error("⚠️ POST-PAYMENT AMOUNT TAMPER DETECTED — orderId=" + orderId
+            + " phone=" + (pendingEntry.phone || "")
+            + " charged=" + charged + " expected=" + expected
+            + " — REJECTING order placement.");
+          return {
+            success: false,
+            paid:    false,
+            error:   "Payment amount mismatch detected (charged ₹" + charged
+                   + " vs order value ₹" + expected + "). The order has NOT been placed. "
+                   + "Please contact support — your payment will be refunded.",
+            tamper_detected: true,
+            charged_amount:  charged,
+            expected_amount: expected
+          };
+        }
+        console.log("Amount validation OK — orderId=" + orderId + " charged=" + charged + " expected=" + expected);
+      } else {
+        console.warn("hdfc_verifyReturnPayload: no pending entry for amount validation — orderId=" + orderId);
       }
+    } catch (e) {
+      console.error("Post-payment amount check failed:", e.message);
     }
   }
 
@@ -6090,14 +6129,21 @@ function hdfc_getOrderStatus(orderId) {
 
     const status = String(respBody.status || "").toUpperCase();
     const txnId  = String((respBody.txn_detail && respBody.txn_detail.txn_id) || respBody.txn_id || "");
+    // Extract the actual charged amount — used for post-payment tamper detection.
+    const txnAmount = Number(
+      (respBody.txn_detail && respBody.txn_detail.txn_amount) ||
+      respBody.amount ||
+      0
+    );
     return {
       confirmed: (status === "CHARGED"),
       status:    status,
-      txn_id:    txnId
+      txn_id:    txnId,
+      amount:    txnAmount
     };
   } catch (err) {
     console.error("hdfc_getOrderStatus error:", err.message);
-    return { confirmed: false, status: "FETCH_ERROR", txn_id: "" };
+    return { confirmed: false, status: "FETCH_ERROR", txn_id: "", amount: 0 };
   }
 }
 
