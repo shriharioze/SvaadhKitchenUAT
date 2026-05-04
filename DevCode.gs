@@ -281,16 +281,21 @@ function doGet(e) {
       .join("&");
     const redirectUrl = HDFC_ORDER_PAGE_URL + "?" + params;
     return HtmlService.createHtmlOutput(
-      '<!DOCTYPE html><html><head></head><body>' +
+      '<!DOCTYPE html><html><head></head>' +
+      '<body onload="redir()" style="font-family:system-ui;text-align:center;padding:60px 20px;">' +
       '<script>' +
-      '  var u = ' + JSON.stringify(redirectUrl) + ';' +
-      '  try { window.top.location.href = u; }' +              // navigate the browser tab, not the iframe
-      '  catch(_e1) {' +
-      '    try { window.open(u, "_top"); }' +
-      '    catch(_e2) { window.location.href = u; }' +
+      '  function redir(){' +
+      '    var u = ' + JSON.stringify(redirectUrl) + ';' +
+      '    try { window.top.location.href = u; }' +
+      '    catch(_e1) {' +
+      '      try { window.open(u, "_top"); }' +
+      '      catch(_e2) { window.location.href = u; }' +
+      '    }' +
       '  }' +
+      '  redir();' +
       '</script>' +
-      '<p>Redirecting... <a href="' + redirectUrl + '" target="_top">Click here if not redirected</a></p>' +
+      '<p style="color:#666;">Redirecting to your order page…</p>' +
+      '<p><a href="' + redirectUrl + '" target="_top" style="display:inline-block;padding:12px 24px;background:#0891b2;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Continue to Order →</a></p>' +
       '</body></html>'
     );
   }
@@ -464,16 +469,21 @@ function doPost(e) {
           .join("&");
         const redirectUrl = HDFC_ORDER_PAGE_URL + "?" + params;
         return HtmlService.createHtmlOutput(
-          `<!DOCTYPE html><html><head></head><body>` +
+          `<!DOCTYPE html><html><head></head>` +
+          `<body onload="redir()" style="font-family:system-ui;text-align:center;padding:60px 20px;">` +
           `<script>` +
-          `  var u = ${JSON.stringify(redirectUrl)};` +
-          `  try { window.top.location.href = u; }` +
-          `  catch(_e1) {` +
-          `    try { window.open(u, "_top"); }` +
-          `    catch(_e2) { window.location.href = u; }` +
+          `  function redir(){` +
+          `    var u = ${JSON.stringify(redirectUrl)};` +
+          `    try { window.top.location.href = u; }` +
+          `    catch(_e1) {` +
+          `      try { window.open(u, "_top"); }` +
+          `      catch(_e2) { window.location.href = u; }` +
+          `    }` +
           `  }` +
+          `  redir();` +
           `</script>` +
-          `<p>Redirecting... <a href="${redirectUrl}" target="_top">Click here if not redirected</a></p>` +
+          `<p style="color:#666;">Redirecting to your order page…</p>` +
+          `<p><a href="${redirectUrl}" target="_top" style="display:inline-block;padding:12px 24px;background:#0891b2;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;">Continue to Order →</a></p>` +
           `</body></html>`
         );
       }

@@ -4171,7 +4171,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.04.21.14-hdfc";
+    const APP_VERSION = "v26.04.21.15-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -7704,9 +7704,12 @@
       const tempId   = `SK${datePart}G${rand}`;
 
       // Save full order state to GAS backend before redirecting to HDFC.
-      // sessionStorage/localStorage are unreliable across cross-origin redirects.
       // Backend stores it keyed by tempId, retrieved on return.
       S.hdfcPendingOrderId = tempId;
+      // Also persist tempId to localStorage so we can recover it on return
+      // even if HDFC's return URL doesn't include order_id (some HDFC test
+      // mocks omit it, sending only status + signature).
+      try { localStorage.setItem("svaadh_hdfc_pending_order", tempId); } catch (_) {}
       try {
         await fetch(APPS_SCRIPT_URL, {
           method: "POST",
@@ -7764,9 +7767,15 @@
      */
     async function hdfc_handleReturnParams() {
       const params    = new URLSearchParams(window.location.search);
-      const orderId   = params.get("hdfc_order_id")  || params.get("order_id");
+      let   orderId   = params.get("hdfc_order_id")  || params.get("order_id");
       const status    = params.get("hdfc_status")    || params.get("status");
       const signature = params.get("hdfc_sig")       || params.get("signature");
+
+      // Fallback: HDFC may return status without order_id. Recover the order_id
+      // from localStorage, where placeHDFC saved it before redirecting to HDFC.
+      if (!orderId && status) {
+        try { orderId = localStorage.getItem("svaadh_hdfc_pending_order") || ""; } catch (_) {}
+      }
 
       if (!orderId || !status) return;   // Not a gateway return, normal page load
 
@@ -7843,6 +7852,8 @@
 
             S.hdfcPaymentVerified = true;
             S.hdfcGatewayOrderId  = orderId;
+            // Clear pending-order localStorage entry now that we've handled it
+            try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch (_) {}
             // Remove loading overlay — showSuccess will take over the screen
             verifyOverlay.remove();
             await hdfc_submitVerifiedOrder(orderId, status);
