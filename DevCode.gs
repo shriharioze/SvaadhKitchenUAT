@@ -281,9 +281,17 @@ function doGet(e) {
       .join("&");
     const redirectUrl = HDFC_ORDER_PAGE_URL + "?" + params;
     return HtmlService.createHtmlOutput(
-      '<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=' + redirectUrl + '"></head>' +
-      '<body><script>try{window.top.location.replace(' + JSON.stringify(redirectUrl) + ');}catch(_){window.location.replace(' + JSON.stringify(redirectUrl) + ');}</script>' +
-      '<p>Redirecting... <a href="' + redirectUrl + '" target="_top">Click here if not redirected</a></p></body></html>'
+      '<!DOCTYPE html><html><head></head><body>' +
+      '<script>' +
+      '  var u = ' + JSON.stringify(redirectUrl) + ';' +
+      '  try { window.top.location.href = u; }' +              // navigate the browser tab, not the iframe
+      '  catch(_e1) {' +
+      '    try { window.open(u, "_top"); }' +
+      '    catch(_e2) { window.location.href = u; }' +
+      '  }' +
+      '</script>' +
+      '<p>Redirecting... <a href="' + redirectUrl + '" target="_top">Click here if not redirected</a></p>' +
+      '</body></html>'
     );
   }
   // ─────────────────────────────────────────────────────────────
@@ -456,9 +464,17 @@ function doPost(e) {
           .join("&");
         const redirectUrl = HDFC_ORDER_PAGE_URL + "?" + params;
         return HtmlService.createHtmlOutput(
-          `<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=${redirectUrl}"></head>` +
-          `<body><script>try{window.top.location.replace(${JSON.stringify(redirectUrl)});}catch(_){window.location.replace(${JSON.stringify(redirectUrl)});}</script>` +
-          `<p>Redirecting... <a href="${redirectUrl}" target="_top">Click here if not redirected</a></p></body></html>`
+          `<!DOCTYPE html><html><head></head><body>` +
+          `<script>` +
+          `  var u = ${JSON.stringify(redirectUrl)};` +
+          `  try { window.top.location.href = u; }` +
+          `  catch(_e1) {` +
+          `    try { window.open(u, "_top"); }` +
+          `    catch(_e2) { window.location.href = u; }` +
+          `  }` +
+          `</script>` +
+          `<p>Redirecting... <a href="${redirectUrl}" target="_top">Click here if not redirected</a></p>` +
+          `</body></html>`
         );
       }
     }
