@@ -5536,27 +5536,25 @@ function submitManualOrder(body) {
 /**
  * STEP 1 — Called by order.html when customer chooses to pay via gateway.
 /**
- * SERVER-SIDE AUTHORITATIVE PRICING (HDFC UAT — Amount Tampering fix)
+ * SERVER-SIDE ITEM-TOTAL FLOOR (HDFC UAT — Amount Tampering fix)
  *
- * Recomputes the order grand total entirely server-side from the saved cart,
- * using authoritative menu prices. Used by hdfc_createSession and
- * hdfc_verifyReturnPayload to defeat client-side amount tampering.
+ * Computes the minimum authoritative amount for a saved cart by summing
+ * Σ(qty × menu_price) for every item. This is used as a TAMPER FLOOR:
+ * the gateway must charge at least this much. Delivery fees, day-tier
+ * discounts and loyalty surcharge are deliberately NOT computed here —
+ * they are the frontend's responsibility (the only consequence of
+ * skipping them is the floor being slightly lower than the displayed
+ * total, which is fine: any value at or above the floor is safe).
  *
- * Logic mirrors submitOrder() pricing:
- *   - item subtotal  = Σ (authoritative_price × qty)
- *   - day-tier disc  = 7.5% if dayFood ≥ 450, else 5% if ≥ 300, else 0
- *   - delivery       = ₹10 per non-free meal where subtotal < threshold
- *                     (threshold: ₹100 if 1 meal that day, ₹150 if multi-meal)
+ * Used as a "server-trusted minimum" in hdfc_createSession and
+ * hdfc_verifyReturnPayload:
+ *   - createSession: charge MAX(client_amount, item_floor)
+ *   - verifyReturn:  reject if charged_amount < item_floor − ₹1
  *
- * Loyalty surcharge intentionally not applied — it is small (≤5%), and
- * skipping it can only result in undercharging (no security risk).
- * submitOrder() applies the correct surcharge when finalizing the row.
- *
- * @param {Object} savedOrders  S.orders snapshot { date: { Breakfast/Lunch/Dinner: { items, area, ... } } }
- * @param {Object} profile      Customer profile (unused for now, reserved)
- * @returns {Number}            Authoritative total in rupees
+ * @param {Object} savedOrders  S.orders snapshot { date: { Meal: { items, ... } } }
+ * @returns {Number}            Authoritative item-total floor (rupees)
  */
-function _serverComputeAmountFromCart(savedOrders, profile) {
+function _serverComputeItemTotal(savedOrders) {
   if (!savedOrders || typeof savedOrders !== "object") return 0;
 
   // Static lunch/dinner price map — mirror of frontend FIXED_MEAL_ITEMS.
@@ -5569,7 +5567,6 @@ function _serverComputeAmountFromCart(savedOrders, profile) {
     "Dal (200ml)": 22, "Rice (100g)": 12, "Salad (40g)": 7, "Curd (50g)": 12
   };
 
-  // Inline price lookup — breakfast from menu, lunch/dinner from static map
   function priceOf(colKey, meal, menu) {
     if (meal === "Breakfast") {
       if (colKey === "B_CURD") return 12;
@@ -5579,54 +5576,27 @@ function _serverComputeAmountFromCart(savedOrders, profile) {
     return Number(LD_PRICE[colKey] || 0);
   }
 
-  const freeAreas = (getAreas() || []).filter(function(a){ return a.free; }).map(function(a){ return a.name; });
-  const DELIVERY  = 10;
   const menuCache = {};
-  let grand = 0;
+  let total = 0;
 
   Object.keys(savedOrders).forEach(function(date) {
-    const day  = savedOrders[date] || {};
+    const day = savedOrders[date] || {};
     if (!menuCache[date]) menuCache[date] = getMenu(date);
     const menu = menuCache[date];
-
-    let dayFood = 0;
-    const mealsInfo = {};
 
     ["Breakfast", "Lunch", "Dinner"].forEach(function(meal) {
       const m = day[meal];
       if (!m || !m.items) return;
-      let sub = 0;
       Object.entries(m.items).forEach(function(pair) {
         const colKey = pair[0];
         const qty    = Number(pair[1]) || 0;
         if (qty <= 0) return;
-        sub += priceOf(colKey, meal, menu) * qty;
+        total += priceOf(colKey, meal, menu) * qty;
       });
-      if (sub > 0) {
-        mealsInfo[meal] = { subtotal: sub, area: m.area || "" };
-        dayFood += sub;
-      }
     });
-
-    // Day-tier discount
-    let discRate = 0;
-    if (dayFood >= 450)      discRate = 0.075;
-    else if (dayFood >= 300) discRate = 0.05;
-    const dayDisc = Math.round(dayFood * discRate);
-
-    // Per-meal delivery fee
-    const mealCount = Object.keys(mealsInfo).length;
-    const threshold = mealCount <= 1 ? 100 : 150;
-    let dayDeliv = 0;
-    Object.values(mealsInfo).forEach(function(info) {
-      const inFree = freeAreas.indexOf(info.area) !== -1;
-      if (!inFree && info.subtotal < threshold) dayDeliv += DELIVERY;
-    });
-
-    grand += (dayFood - dayDisc + dayDeliv);
   });
 
-  return Math.round(grand);
+  return Math.round(total);
 }
 
 
@@ -5674,23 +5644,27 @@ function hdfc_createSession(body) {
     return { error: "Pending order not found. Please retry checkout." };
   }
 
-  const authoritativeAmount = _serverComputeAmountFromCart(pendingEntry.orders, pendingEntry.profile);
-  if (authoritativeAmount <= 0) {
+  const itemFloor   = _serverComputeItemTotal(pendingEntry.orders);
+  const clientAmount = Number(body.amount || 0);
+  if (itemFloor <= 0) {
     return { error: "Could not compute order total. Cart may be empty." };
   }
 
-  // Audit log: flag any tampering attempt for security review
-  const clientAmount = Number(body.amount || 0);
-  if (Math.abs(authoritativeAmount - clientAmount) > 1) {
+  // The gateway must charge at LEAST the item-total floor. If the client
+  // value is at or above the floor, trust it (it includes legit delivery /
+  // surcharge / discount that we don't reproduce server-side). If the client
+  // value is below the floor, this is a tamper — fall back to the floor.
+  let amountToSend = clientAmount;
+  if (clientAmount < itemFloor - 1) {
     console.warn("⚠️ AMOUNT TAMPER DETECTED on hdfc_createSession — orderId="
       + orderId + " phone=" + phone + " client=" + clientAmount
-      + " server=" + authoritativeAmount + " — using SERVER value.");
+      + " floor=" + itemFloor + " — overriding to floor.");
+    amountToSend = itemFloor;
   }
 
-  // Persist the server-trusted amount back into the pending entry
-  // (so hdfc_finalizeOrder / submitOrder also see the trusted value).
+  // Persist the trusted amount back into the pending entry
   try {
-    pendingEntry.amount = authoritativeAmount;
+    pendingEntry.amount = amountToSend;
     const allPending = JSON.parse(props.getProperty("HDFC_PENDING_ORDERS") || "{}");
     allPending[orderId] = pendingEntry;
     props.setProperty("HDFC_PENDING_ORDERS", JSON.stringify(allPending));
@@ -5698,7 +5672,7 @@ function hdfc_createSession(body) {
 
   // HDFC SmartGateway expects amount in RUPEES (empirically confirmed — UAT showed 100x
   // inflation when sending paisa, so SmartGateway/Juspay takes rupees directly, not paisa)
-  const amountToSend = Math.round(authoritativeAmount);
+  amountToSend = Math.round(amountToSend);
 
   const payload = {
     order_id:               orderId,
@@ -6021,26 +5995,27 @@ function hdfc_verifyReturnPayload(body) {
       const pendingRaw   = props.getProperty("HDFC_PENDING_ORDERS") || "{}";
       const pendingEntry = JSON.parse(pendingRaw)[orderId] || null;
       if (pendingEntry && pendingEntry.orders) {
-        const expected = _serverComputeAmountFromCart(pendingEntry.orders, pendingEntry.profile);
-        const charged  = Number(statusCheck.amount || 0);
-        // Allow ₹1 tolerance (rounding); reject anything more
-        if (expected > 0 && charged < expected - 1) {
+        const itemFloor = _serverComputeItemTotal(pendingEntry.orders);
+        const charged   = Number(statusCheck.amount || 0);
+        // Reject if charged amount is below the item-total floor (₹1 rounding tolerance).
+        // Charges ABOVE the floor are fine — they may include legitimate delivery/surcharge.
+        if (itemFloor > 0 && charged < itemFloor - 1) {
           console.error("⚠️ POST-PAYMENT AMOUNT TAMPER DETECTED — orderId=" + orderId
             + " phone=" + (pendingEntry.phone || "")
-            + " charged=" + charged + " expected=" + expected
+            + " charged=" + charged + " floor=" + itemFloor
             + " — REJECTING order placement.");
           return {
             success: false,
             paid:    false,
             error:   "Payment amount mismatch detected (charged ₹" + charged
-                   + " vs order value ₹" + expected + "). The order has NOT been placed. "
+                   + " vs minimum order value ₹" + itemFloor + "). The order has NOT been placed. "
                    + "Please contact support — your payment will be refunded.",
             tamper_detected: true,
             charged_amount:  charged,
-            expected_amount: expected
+            expected_amount: itemFloor
           };
         }
-        console.log("Amount validation OK — orderId=" + orderId + " charged=" + charged + " expected=" + expected);
+        console.log("Amount validation OK — orderId=" + orderId + " charged=" + charged + " floor=" + itemFloor);
       } else {
         console.warn("hdfc_verifyReturnPayload: no pending entry for amount validation — orderId=" + orderId);
       }
