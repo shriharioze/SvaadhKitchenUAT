@@ -5535,6 +5535,105 @@ function submitManualOrder(body) {
 
 /**
  * STEP 1 — Called by order.html when customer chooses to pay via gateway.
+// ════════════════════════════════════════════════════════════════════════
+// SERVER-SIDE AUTHORITATIVE PRICING (HDFC UAT — Amount Tampering fix)
+// ════════════════════════════════════════════════════════════════════════
+// Mirror of frontend FIXED_MEAL_ITEMS prices (lunch/dinner items are static).
+// Source-of-truth: docs/order.html → FIXED_MEAL_ITEMS. Keep in sync.
+const _SERVER_LD_PRICE = {
+  "Chapati": 9, "Without Oil Chapati": 8, "Phulka": 7, "Ghee Phulka": 10,
+  "Jowar Bhakri": 20, "Bajra Bhakri": 20,
+  "Dry Sabji Mini (100ml)": 22, "Dry Sabji Full (250ml)": 45,
+  "Curry Sabji Mini (100ml)": 22, "Curry Sabji Full (250ml)": 45,
+  "Dal (200ml)": 22, "Rice (100g)": 12, "Salad (40g)": 7, "Curd (50g)": 12
+};
+
+// Resolve authoritative price for a single item (colKey) on a given meal/menu.
+function _serverItemPrice(colKey, meal, menu) {
+  if (meal === "Breakfast") {
+    if (colKey === "B_CURD") return 12;  // Breakfast Curd flat price
+    const f = (menu && menu.breakfast || []).find(b => b.name === colKey);
+    return f ? Number(f.price) || 0 : 0;
+  }
+  // Lunch / Dinner — static price map
+  return Number(_SERVER_LD_PRICE[colKey] || 0);
+}
+
+/**
+ * Recompute the order grand total entirely server-side from the saved cart,
+ * using authoritative menu prices. Used by hdfc_createSession to defeat
+ * client-side amount tampering (HDFC UAT finding).
+ *
+ * Logic mirrors submitOrder() pricing:
+ *   - item subtotal  = Σ (authoritative_price × qty)
+ *   - day-tier disc  = 7.5% if dayFood ≥ 450, else 5% if ≥ 300, else 0
+ *   - delivery       = ₹10 per non-free meal where subtotal < threshold
+ *                     (threshold: ₹100 if 1 meal that day, ₹150 if multi-meal)
+ *
+ * Loyalty surcharge is intentionally NOT applied here — it is small (≤5%)
+ * and skipping it can only result in undercharging, never overcharging
+ * (no security risk). submitOrder() applies the correct surcharge when
+ * the order is finalized in the sheet.
+ *
+ * @param {Object} savedOrders  S.orders snapshot { date: { Breakfast/Lunch/Dinner: { items, area, ... } } }
+ * @param {Object} profile      Customer profile (unused for now, reserved)
+ * @returns {Number}            Authoritative total in rupees
+ */
+function _serverComputeAmountFromCart(savedOrders, profile) {
+  if (!savedOrders || typeof savedOrders !== "object") return 0;
+
+  const freeAreas = (getAreas() || []).filter(a => a.free).map(a => a.name);
+  const DELIVERY  = 10;
+  const menuCache = {};
+  let grand = 0;
+
+  Object.keys(savedOrders).forEach(function(date) {
+    const day  = savedOrders[date] || {};
+    if (!menuCache[date]) menuCache[date] = getMenu(date);
+    const menu = menuCache[date];
+
+    let dayFood = 0;
+    const mealsInfo = {};
+
+    ["Breakfast", "Lunch", "Dinner"].forEach(function(meal) {
+      const m = day[meal];
+      if (!m || !m.items) return;
+      let sub = 0;
+      Object.entries(m.items).forEach(function(pair) {
+        const colKey = pair[0];
+        const qty    = Number(pair[1]) || 0;
+        if (qty <= 0) return;
+        sub += _serverItemPrice(colKey, meal, menu) * qty;
+      });
+      if (sub > 0) {
+        mealsInfo[meal] = { subtotal: sub, area: m.area || "" };
+        dayFood += sub;
+      }
+    });
+
+    // Day-tier discount (mirror submitOrder logic)
+    let discRate = 0;
+    if (dayFood >= 450)      discRate = 0.075;
+    else if (dayFood >= 300) discRate = 0.05;
+    const dayDisc = Math.round(dayFood * discRate);
+
+    // Per-meal delivery fee
+    const mealCount = Object.keys(mealsInfo).length;
+    const threshold = mealCount <= 1 ? 100 : 150;
+    let dayDeliv = 0;
+    Object.values(mealsInfo).forEach(function(info) {
+      const inFree = freeAreas.indexOf(info.area) !== -1;
+      if (!inFree && info.subtotal < threshold) dayDeliv += DELIVERY;
+    });
+
+    grand += (dayFood - dayDisc + dayDeliv);
+  });
+
+  return Math.round(grand);
+}
+
+
+/**
  * Creates a payment session with HDFC SmartGateway (Juspay HyperCheckout).
  * Returns a payment_url to redirect the customer to.
  *
@@ -5546,20 +5645,63 @@ function hdfc_createSession(body) {
 
   const phone        = String(body.phone  || "").trim();
   const name         = String(body.name   || "Customer").trim();
-  const amountRupees = Number(body.amount || 0);
   const orderId      = String(body.order_id    || "").trim();
   const description  = String(body.description || "Svaadh Kitchen Order").trim();
 
-  if (!phone || !orderId || amountRupees <= 0) {
-    return { error: "Missing required fields: phone, order_id, amount." };
+  if (!phone || !orderId) {
+    return { error: "Missing required fields: phone, order_id." };
   }
   if (!HDFC_MERCHANT_ID || !HDFC_API_KEY) {
     return { error: "Gateway credentials not configured in Script Properties." };
   }
 
+  // ────────────────────────────────────────────────────────────────────────
+  // SECURITY (HDFC UAT — Parameter Manipulation / Request Amount Tampering):
+  // Never trust the client-supplied `amount` parameter. An attacker can
+  // intercept the POST between the browser and Apps Script via a proxy tool
+  // (Burp Suite / mitmproxy) and edit the amount to a lower value before it
+  // reaches the gateway. We recompute the authoritative amount server-side
+  // from the saved cart using authoritative menu prices.
+  //
+  // Flow: order.html calls hdfc_savePendingOrder (cart snapshot) → THEN calls
+  // hdfc_createSession. Here we look up that saved cart and recompute.
+  // ────────────────────────────────────────────────────────────────────────
+  const props = PropertiesService.getScriptProperties();
+  let pendingEntry = null;
+  try {
+    const pendingRaw = props.getProperty("HDFC_PENDING_ORDERS") || "{}";
+    pendingEntry = JSON.parse(pendingRaw)[orderId] || null;
+  } catch (e) { /* fall through */ }
+
+  if (!pendingEntry || !pendingEntry.orders) {
+    return { error: "Pending order not found. Please retry checkout." };
+  }
+
+  const authoritativeAmount = _serverComputeAmountFromCart(pendingEntry.orders, pendingEntry.profile);
+  if (authoritativeAmount <= 0) {
+    return { error: "Could not compute order total. Cart may be empty." };
+  }
+
+  // Audit log: flag any tampering attempt for security review
+  const clientAmount = Number(body.amount || 0);
+  if (Math.abs(authoritativeAmount - clientAmount) > 1) {
+    console.warn("⚠️ AMOUNT TAMPER DETECTED on hdfc_createSession — orderId="
+      + orderId + " phone=" + phone + " client=" + clientAmount
+      + " server=" + authoritativeAmount + " — using SERVER value.");
+  }
+
+  // Persist the server-trusted amount back into the pending entry
+  // (so hdfc_finalizeOrder / submitOrder also see the trusted value).
+  try {
+    pendingEntry.amount = authoritativeAmount;
+    const allPending = JSON.parse(props.getProperty("HDFC_PENDING_ORDERS") || "{}");
+    allPending[orderId] = pendingEntry;
+    props.setProperty("HDFC_PENDING_ORDERS", JSON.stringify(allPending));
+  } catch (e) { /* non-fatal */ }
+
   // HDFC SmartGateway expects amount in RUPEES (empirically confirmed — UAT showed 100x
   // inflation when sending paisa, so SmartGateway/Juspay takes rupees directly, not paisa)
-  const amountToSend = Math.round(amountRupees);
+  const amountToSend = Math.round(authoritativeAmount);
 
   const payload = {
     order_id:               orderId,
