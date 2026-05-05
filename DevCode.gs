@@ -1615,18 +1615,24 @@ function submitOrder(body) {
           pStat = "Pending"; // Wallet failed, fallback to pending
         }
       } else if (payMethod === "Split") {
-        // Split: deduct wallet portion now, UPI portion remains pending
+        // Split: deduct wallet portion now. UPI portion is either pending (manual UPI)
+        // or already paid via HDFC gateway (gateway_paid flag set).
         const requestedCredit = Math.min(Number(body.wallet_credit) || 0, netTotal);
+        const isGatewayPaid   = !!body.gateway_paid;
         if (requestedCredit > 0) {
           const currentBalance = _calculateWalletBalance(profile.phone);
           if (currentBalance >= requestedCredit) {
-            _appendWalletTransaction(profile.phone || "", profile.name || "Customer", "Order Deduction (Wallet Part)", requestedCredit, true, sid);
+            _appendWalletTransaction(profile.phone || "", profile.name || "Customer",
+              isGatewayPaid ? "Order Deduction (Split-Wallet)" : "Order Deduction (Wallet Part)",
+              requestedCredit, true, sid);
             walletCreditUsed = requestedCredit;
-            pStat = "Pending"; // UPI portion still outstanding
+            // If the UPI portion was paid via HDFC gateway → both portions settled → Paid.
+            // Otherwise wait for manual UPI confirmation → Pending.
+            pStat = isGatewayPaid ? "Paid" : "Pending";
           } else {
-            // Not enough wallet — fall back to full UPI
-            payMethod = "UPI";
-            pStat = "Pending";
+            // Not enough wallet — fall back to full UPI / Gateway
+            payMethod = isGatewayPaid ? "Gateway (HDFC)" : "UPI";
+            pStat     = isGatewayPaid ? "Paid"           : "Pending";
           }
         }
       } else if (payMethod === "On Account") {
@@ -6009,9 +6015,43 @@ function hdfc_createSession(body) {
       + " — using SERVER value. (Client value ignored.)");
   }
 
-  // Persist the server-trusted amount in the pending entry for audit / refunds.
+  // ── SPLIT-PAYMENT TAMPER GUARD ────────────────────────────────────────────
+  // If the customer chose Split (Wallet + HDFC), the gateway should charge only
+  // (total - walletPortion). Both values are derived SERVER-SIDE from sheets:
+  //   walletPortion = MIN(SK_Wallet balance, authoritativeAmount)
+  // Client-supplied wallet_hint is logged but NEVER trusted. This blocks the
+  // attack where Burp sets wallet_hint=99999 to drop HDFC charge to ₹0.
+  const paymentChoice  = String(body.payment_choice || pendingEntry.payment_choice || "Gateway");
+  const clientWalletHt = Number(body.wallet_hint    || pendingEntry.wallet_hint    || 0);
+  let   walletPortion  = 0;
+
+  if (paymentChoice === "Split") {
+    const phoneForBal  = pendingEntry.phone || phone;
+    const trueBalance  = _calculateWalletBalance(phoneForBal);
+    walletPortion      = Math.min(Math.max(0, trueBalance), authoritativeAmount);
+    if (Math.abs(walletPortion - clientWalletHt) > 1) {
+      console.warn("⚠️ WALLET HINT MISMATCH on hdfc_createSession — orderId=" + orderId
+        + " phone=" + phoneForBal + " client_hint=" + clientWalletHt
+        + " server_balance=" + trueBalance + " applied=" + walletPortion
+        + " — using SERVER value. (Client hint ignored.)");
+    }
+  }
+
+  // Final amount HDFC will actually charge.
+  const hdfcChargeAmount = Math.max(0, authoritativeAmount - walletPortion);
+
+  if (hdfcChargeAmount <= 0) {
+    // Edge case: wallet covers the entire bill. Don't go to HDFC at all —
+    // the client should use Wallet flow instead. Refuse gracefully.
+    return { error: "Wallet balance covers the full bill. Please use Wallet payment instead of Split." };
+  }
+
+  // Persist the server-trusted amounts in the pending entry for audit / refunds.
   try {
-    pendingEntry.amount = authoritativeAmount;
+    pendingEntry.amount         = authoritativeAmount;  // total bill
+    pendingEntry.wallet_applied = walletPortion;        // server-validated wallet portion
+    pendingEntry.hdfc_charged   = hdfcChargeAmount;     // what HDFC will charge
+    pendingEntry.payment_choice = paymentChoice;
     const allPending = JSON.parse(props.getProperty("HDFC_PENDING_ORDERS") || "{}");
     allPending[orderId] = pendingEntry;
     props.setProperty("HDFC_PENDING_ORDERS", JSON.stringify(allPending));
@@ -6019,7 +6059,7 @@ function hdfc_createSession(body) {
 
   // HDFC SmartGateway expects amount in RUPEES (empirically confirmed — UAT showed 100x
   // inflation when sending paisa, so SmartGateway/Juspay takes rupees directly, not paisa)
-  const amountToSend = Math.round(authoritativeAmount);
+  const amountToSend = Math.round(hdfcChargeAmount);
 
   const payload = {
     order_id:               orderId,
@@ -6578,14 +6618,18 @@ function hdfc_savePendingOrder(body) {
     });
 
     pending[orderId] = {
-      ts:            now,
-      phone:         body.phone         || "",
-      amount:        body.amount        || 0,
-      orders:        body.orders        || {},
-      selectedDates: body.selectedDates || [],
-      profile:       body.profile       || {},
-      mealAddrs:     body.mealAddrs     || {},
-      isFirstTime:   body.isFirstTime   || false
+      ts:             now,
+      phone:          body.phone         || "",
+      amount:         body.amount        || 0,
+      orders:         body.orders        || {},
+      selectedDates:  body.selectedDates || [],
+      profile:        body.profile       || {},
+      mealAddrs:      body.mealAddrs     || {},
+      isFirstTime:    body.isFirstTime   || false,
+      // Split-payment hints — server will RE-VALIDATE in hdfc_createSession
+      // by reading the actual SK_Wallet balance. Stored here only for context.
+      payment_choice: body.payment_choice || "Gateway",
+      wallet_hint:    Number(body.wallet_hint || 0)
     };
 
     props.setProperty("HDFC_PENDING_ORDERS", JSON.stringify(pending));

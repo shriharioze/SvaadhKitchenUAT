@@ -4239,7 +4239,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.05.8-hdfc";
+    const APP_VERSION = "v26.05.05.9-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -6748,9 +6748,13 @@
     }
     function resetForAnotherOrder() {
       // If we're on the GAS exec URL (post-HDFC redirect), send the customer
-      // to the real order page instead of resetting in place.
-      if (window.location.hostname === "script.google.com") {
-        window.location.href = "https://svaadhkitchen.in/order.html";
+      // to the canonical order page instead of resetting in place — otherwise
+      // location.reload() prompts "you may lose data" and lands on a stuck
+      // resubmission page.
+      const _host = window.location.hostname || "";
+      if (_host.indexOf("script.google.com") !== -1 || _host.indexOf("googleusercontent.com") !== -1) {
+        const _target = "https://shriharioze.github.io/SvaadhKitchenUAT/order.html";
+        try { window.top.location.href = _target; } catch(_) { window.location.href = _target; }
         return;
       }
 
@@ -7793,19 +7797,29 @@
         localStorage.setItem("svaadh_hdfc_pending_order", tempId);
         localStorage.setItem("svaadh_hdfc_pending_ts", String(Date.now()));
       } catch (_) {}
+      // Whether this is a Split (wallet + HDFC) payment. Only the HDFC portion
+      // should be charged via gateway; the rest comes from wallet on success.
+      // Server will RECOMPUTE the wallet portion from SK_Wallet sheet anyway —
+      // the client values below are hints only and ignored if tampered with.
+      const _isSplit       = (S.paymentChoice === "Split");
+      const _walletHint    = _isSplit ? Number(S.walletCredit || 0) : 0;
+      const _paymentChoice = String(S.paymentChoice || "Gateway");
+
       try {
         await fetch(APPS_SCRIPT_URL, {
           method: "POST",
           body: JSON.stringify({
-            _action:       "hdfc_savePendingOrder",
-            order_id:      tempId,
-            phone:         S.phone         || "",
-            amount:        S.grandTotal    || 0,
-            orders:        S.orders        || {},
-            selectedDates: S.selectedDates || [],
-            profile:       S.profile       || {},
-            mealAddrs:     S.mealAddrs     || {},
-            isFirstTime:   S.isFirstTime   || false
+            _action:        "hdfc_savePendingOrder",
+            order_id:       tempId,
+            phone:          S.phone         || "",
+            amount:         S.grandTotal    || 0,
+            orders:         S.orders        || {},
+            selectedDates:  S.selectedDates || [],
+            profile:        S.profile       || {},
+            mealAddrs:      S.mealAddrs     || {},
+            isFirstTime:    S.isFirstTime   || false,
+            payment_choice: _paymentChoice,    // "Gateway" or "Split"
+            wallet_hint:    _walletHint        // client suggests wallet amount; server validates
           })
         });
       } catch (_) { /* non-fatal — proceed with redirect even if save fails */ }
@@ -7814,12 +7828,14 @@
         const res = await fetch(APPS_SCRIPT_URL, {
           method: "POST",
           body: JSON.stringify({
-            _action:     "hdfc_createSession",
-            phone:       S.phone,
-            name:        S.profile.name || "Customer",
-            amount:      S.grandTotal,
-            order_id:    tempId,
-            description: `Svaadh Kitchen Order — ${S.phone}`
+            _action:        "hdfc_createSession",
+            phone:          S.phone,
+            name:           S.profile.name || "Customer",
+            amount:         S.grandTotal,
+            order_id:       tempId,
+            description:    `Svaadh Kitchen Order — ${S.phone}`,
+            payment_choice: _paymentChoice,
+            wallet_hint:    _walletHint
           })
         });
         const data = await res.json();
@@ -8004,6 +8020,24 @@
         if (meals.length) orders.push({ date, meals });
       }
 
+      // For Split payments (wallet + HDFC), fetch the SERVER-VALIDATED wallet
+      // portion that was applied at hdfc_createSession time. The server already
+      // re-checked SK_Wallet balance and clamped to MIN(balance, total). We
+      // pass that amount back so submitOrder deducts the correct wallet portion.
+      let _walletApplied = 0;
+      let _isSplit       = false;
+      try {
+        const _pendRes  = await fetch(APPS_SCRIPT_URL, {
+          method: "POST",
+          body: JSON.stringify({ _action: "hdfc_getPendingOrder", order_id: gatewayOrderId })
+        });
+        const _pendData = await _pendRes.json();
+        if (_pendData && _pendData.success) {
+          _walletApplied = Number(_pendData.wallet_applied || 0);
+          _isSplit       = String(_pendData.payment_choice || "") === "Split";
+        }
+      } catch(_) {}
+
       const payload = {
         profile: {
           name: S.profile.name, phone: S.phone,
@@ -8016,11 +8050,15 @@
           isFirstTime: S.isFirstTime
         },
         orders,
-        payment_method: "Gateway (HDFC)",
-        payment_status: "Paid",
+        // Split-paid-via-gateway: tell server it's a Split with this wallet portion,
+        // AND set gateway_paid so server marks status Paid (not Pending UPI).
+        payment_method:   _isSplit ? "Split" : "Gateway (HDFC)",
+        payment_status:   "Paid",
+        wallet_credit:    _walletApplied,
         gateway_order_id: gatewayOrderId,
         gateway_status:   hdfcStatus,
-        settle_all: false
+        gateway_paid:     true,                   // server flag: skip Pending status
+        settle_all:       false
       };
 
       try {
