@@ -4220,7 +4220,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.05.10-hdfc";
+    const APP_VERSION = "v26.05.05.11-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -6433,6 +6433,10 @@
       const status = sp.get("hdfc_status") || sp.get("status");
       if (!status) return; // not a return — let it sit, user may still complete payment
 
+      // Remove early overlay BEFORE any sAlert below
+      const _early = document.getElementById("hdfc-early-overlay");
+      if (_early) _early.remove();
+
       try {
         const res = await fetch(APPS_SCRIPT_URL, {
           method: "POST",
@@ -7728,9 +7732,7 @@
      * If URL params are missing but localStorage has a pending order, polls backend.
      */
     async function hdfc_init() {
-      // Helper: remove the early overlay injected by the top-of-head script
-      // (used by both the URL-param and polling paths once we hand off to their
-      // own overlays / success modals).
+      // Helper: remove the early overlay injected by the top-of-head script.
       const _removeEarlyOverlay = () => {
         const el = document.getElementById("hdfc-early-overlay");
         if (el) el.remove();
@@ -7739,12 +7741,13 @@
       // 0. If we have a pending wallet recharge in localStorage and we just
       //    came back with HDFC return params, finalize the wallet credit
       //    BEFORE hdfc_handleReturnParams (which is for ORDER returns).
+      //    Each handler removes the early overlay BEFORE any sAlert so the
+      //    user can interact with the alert (otherwise spinner blocks clicks).
       await hdfc_handleRechargeReturn();
+      _removeEarlyOverlay();
 
       // 1. Check for return URL params first (customer coming back from HDFC)
       await hdfc_handleReturnParams();
-      // If hdfc_handleReturnParams kicked in, it will have shown its own overlay.
-      // Either way we're past the early overlay's job.
       _removeEarlyOverlay();
 
       // 2. Fetch gateway config from backend
@@ -7791,8 +7794,19 @@
         return;
       }
 
-      const btn = $("hdfcPayBtn");
-      if (btn) { btn.disabled = true; btn.textContent = "⏳ Creating secure session…"; }
+      // Disable + show loading text on whichever Pay button is currently visible
+      // (regular Gateway flow uses #hdfcPayBtn; Split flow uses #splitHdfcPayBtn)
+      const _payBtns = ["hdfcPayBtn", "splitHdfcPayBtn"]
+        .map(id => $(id))
+        .filter(b => b);
+      const _origBtnHtml = {};
+      _payBtns.forEach(b => {
+        _origBtnHtml[b.id] = b.innerHTML;
+        b.disabled  = true;
+        b.innerHTML = "⏳ Creating secure session…";
+      });
+      // Backwards-compat alias used by existing error-handler code below
+      const btn = $("hdfcPayBtn") || $("splitHdfcPayBtn");
 
       // Generate a unique gateway order ID for this session.
       // Rules (HDFC security audit): alphanumeric only, ≤21 chars, non-sequential.
@@ -7864,12 +7878,13 @@
           throw new Error(data.error || "Could not create payment session.");
         }
       } catch (err) {
-        if (btn) {
-          btn.disabled    = false;
-          btn.innerHTML   = "🔒 Pay ₹<span id='hdfcPayBtnAmt'>" + (S.grandTotal || 0) + "</span> via HDFC Gateway";
-        }
+        // Re-enable both Pay buttons and restore their original labels
+        _payBtns.forEach(b => {
+          b.disabled  = false;
+          b.innerHTML = _origBtnHtml[b.id] || b.innerHTML;
+        });
         await sAlert(
-          "Could not reach payment gateway. Please try UPI payment instead.\n\nError: " + err.message,
+          "Could not reach payment gateway.\n\nError: " + err.message,
           "Gateway Error", "❌"
         );
       }
@@ -7894,6 +7909,11 @@
       }
 
       if (!orderId || !status) return;   // Not a gateway return, normal page load
+
+      // Remove the early overlay BEFORE we may show sAlert below — otherwise
+      // the spinner sits on top and the user can't click OK on the alert.
+      const _early = document.getElementById("hdfc-early-overlay");
+      if (_early) _early.remove();
 
       // Clean up URL immediately so user doesn't see ugly params
       window.history.replaceState({}, "", window.location.pathname);

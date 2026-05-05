@@ -4887,7 +4887,7 @@ function hdfc_createWalletRechargeSession(body) {
 
   try {
     const authToken = Utilities.base64Encode(HDFC_API_KEY + ":");
-    const apiUrl = (HDFC_ENV === "live" ? HDFC_LIVE_URL : HDFC_TEST_URL) + "/session";
+    const apiUrl = HDFC_BASE_URL + "/session";
     const resp = UrlFetchApp.fetch(apiUrl, {
       method: "post",
       contentType: "application/json",
