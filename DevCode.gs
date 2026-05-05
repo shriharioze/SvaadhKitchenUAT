@@ -265,6 +265,67 @@ const BUSINESS_CONTEXT = {
   }
 };
 
+// ════════════════════════════════════════════════════════════════════════
+// HDFC return-URL → GitHub Pages redirect HTML
+// ════════════════════════════════════════════════════════════════════════
+// Apps Script HtmlService output renders inside a sandboxed iframe at
+// script.googleusercontent.com (parent at script.google.com). Cross-origin
+// scripted navigation of window.top is silently BLOCKED in some browsers,
+// leaving customers stuck on the redirect page. Form auto-submit with
+// target="_top" navigates the outer browser tab reliably even when
+// scripted location.href is blocked.
+// (Defined ABOVE doGet/doPost so any paste covering the entry points
+//  also includes this helper.)
+function _hdfcReturnRedirectHtml(redirectUrl) {
+  // Defensive defaults — never return blank, always navigate somewhere.
+  const safeUrl = String(redirectUrl || "https://shriharioze.github.io/SvaadhKitchenUAT/order.html");
+  let action = safeUrl, queryString = "";
+  const idx = safeUrl.indexOf("?");
+  if (idx !== -1) { action = safeUrl.substring(0, idx); queryString = safeUrl.substring(idx + 1); }
+
+  let inputs = "";
+  if (queryString) {
+    queryString.split("&").forEach(function(pair) {
+      if (!pair) return;
+      const eq = pair.indexOf("=");
+      const k = eq === -1 ? pair : pair.substring(0, eq);
+      let   v = eq === -1 ? ""   : pair.substring(eq + 1);
+      try { v = decodeURIComponent(v.replace(/\+/g, " ")); } catch (_) { /* keep raw */ }
+      const safeK = String(k).replace(/"/g, "&quot;").replace(/</g, "&lt;");
+      const safeV = String(v).replace(/"/g, "&quot;").replace(/</g, "&lt;");
+      inputs += '<input type="hidden" name="' + safeK + '" value="' + safeV + '">';
+    });
+  }
+
+  // Triple-fallback navigation:
+  //   1. Form auto-submit on body load (most reliable, breaks out of iframe sandbox)
+  //   2. window.top.location.href via JS after 200ms (in case form submit blocked)
+  //   3. Visible Continue button users can click manually
+  return '<!DOCTYPE html><html><head><title>Redirecting…</title>' +
+         '<meta http-equiv="refresh" content="2;url=' + safeUrl.replace(/"/g, "&quot;") + '">' +
+         '</head>' +
+         '<body onload="document.getElementById(\'r\').submit();" ' +
+              'style="font-family:system-ui,Arial,sans-serif;text-align:center;padding:60px 20px;background:#fef9f6;">' +
+         '<form id="r" action="' + action.replace(/"/g, "&quot;") + '" method="GET" target="_top">' + inputs + '</form>' +
+         '<script>' +
+         '  setTimeout(function(){' +
+         '    try { document.getElementById("r").submit(); } catch(_){}' +
+         '    try { window.top.location.href = ' + JSON.stringify(safeUrl) + '; } catch(_){}' +
+         '  }, 200);' +
+         '</script>' +
+         '<div style="font-size:1.2rem;color:#0f766e;font-weight:700;margin-bottom:10px;">Returning to Svaadh Kitchen…</div>' +
+         '<p style="color:#666;font-size:0.9rem;margin-bottom:24px;">Confirming your payment</p>' +
+         '<p>' +
+         '  <a href="' + safeUrl.replace(/"/g, "&quot;") + '" target="_top" ' +
+         '     style="display:inline-block;padding:14px 28px;background:#0891b2;color:#fff;' +
+                    'text-decoration:none;border-radius:8px;font-weight:600;font-size:1rem;">' +
+         '    Continue to Order →' +
+         '  </a>' +
+         '</p>' +
+         '</body></html>';
+}
+
+
 // ── ENTRY POINT ──────────────────────────────────────────────
 function doGet(e) {
   const p = e.parameter;
@@ -423,55 +484,6 @@ function doGet(e) {
   }
 }
 
-
-// ════════════════════════════════════════════════════════════════════════
-// HDFC return-URL → GitHub Pages redirect HTML
-// ════════════════════════════════════════════════════════════════════════
-// Apps Script HtmlService output is rendered inside a sandboxed iframe at
-// script.googleusercontent.com (parent at script.google.com). Cross-origin
-// scripted navigation of window.top is silently BLOCKED in some browsers,
-// which left customers stuck on the redirect page until they manually
-// clicked the link. Form auto-submit with target="_top" navigates the
-// outer browser tab reliably even when scripted location.href is blocked.
-function _hdfcReturnRedirectHtml(redirectUrl) {
-  // Split URL so we can submit query params via GET form
-  const idx = redirectUrl.indexOf("?");
-  const action = idx === -1 ? redirectUrl : redirectUrl.substring(0, idx);
-  const queryString = idx === -1 ? "" : redirectUrl.substring(idx + 1);
-  let inputs = "";
-  if (queryString) {
-    queryString.split("&").forEach(function(pair) {
-      const eq = pair.indexOf("=");
-      const k = eq === -1 ? pair : pair.substring(0, eq);
-      const v = eq === -1 ? ""   : decodeURIComponent(pair.substring(eq + 1).replace(/\+/g, " "));
-      // Re-encode safely for HTML attribute
-      const safeK = String(k).replace(/"/g, "&quot;");
-      const safeV = String(v).replace(/"/g, "&quot;");
-      inputs += '<input type="hidden" name="' + safeK + '" value="' + safeV + '">';
-    });
-  }
-  return '<!DOCTYPE html><html><head><title>Redirecting…</title></head>' +
-         '<body onload="document.getElementById(\'r\').submit();" ' +
-              'style="font-family:system-ui;text-align:center;padding:60px 20px;background:#fef9f6;">' +
-         '<form id="r" action="' + action + '" method="GET" target="_top">' + inputs + '</form>' +
-         '<script>' +
-         '  // Belt-and-suspenders: also try direct top-level navigation' +
-         '  setTimeout(function(){' +
-         '    try { document.getElementById("r").submit(); } catch(_){}' +
-         '    try { window.top.location.href = ' + JSON.stringify(redirectUrl) + '; } catch(_){}' +
-         '  }, 300);' +
-         '</script>' +
-         '<div style="font-size:1.1rem;color:#0f766e;font-weight:700;margin-bottom:8px;">Returning to Svaadh Kitchen…</div>' +
-         '<p style="color:#666;font-size:0.9rem;">Confirming your payment</p>' +
-         '<p style="margin-top:24px;">' +
-         '  <a href="' + redirectUrl + '" target="_top" ' +
-         '     style="display:inline-block;padding:12px 24px;background:#0891b2;color:#fff;' +
-                    'text-decoration:none;border-radius:8px;font-weight:600;">' +
-         '    Continue to Order →' +
-         '  </a>' +
-         '</p>' +
-         '</body></html>';
-}
 
 function doPost(e) {
   try {
