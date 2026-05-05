@@ -12,7 +12,7 @@ const KITCHEN_PIN    = SP.getProperty("KITCHEN_PIN") || "7284";
 const PLACE_ID       = SP.getProperty("PLACE_ID") || "";
 const GOOGLE_PLACES_API_KEY = SP.getProperty("GOOGLE_PLACES_API_KEY") || "";
 
-const CODE_VERSION   = 14.2; // Standardized Menu Names
+const CODE_VERSION   = 14.3; // HDFC polling + redirect fixes
 const LEDGER_FOLDER  = "Svaadh Customer Ledgers";
 
 // ── PAYMENT GATEWAY CONFIG ───────────────────────────────────
@@ -333,17 +333,30 @@ function doGet(e) {
   const pin = p.pin || "";
 
   // ── HDFC Return URL via GET ────────────────────────────────────
-  // HDFC sometimes redirects the customer's browser via GET (not POST).
-  // Detect by presence of order_id + status params with no _action.
-  // Redirect browser to the order page URL with all params forwarded.
-  if (p.order_id && p.status && !p.action && !p._action) {
+  // HDFC redirects the customer's browser here after payment.
+  // Detect by presence of status param with no action/_action.
+  // HDFC UAT mock may NOT send order_id — only status (+ maybe signature).
+  // If order_id is missing, recover it from the most recent HDFC_PENDING_ORDERS entry.
+  const _HDFC_STATUSES = ["CHARGED","SUCCESS","PENDING","PENDING_VBV","AUTHENTICATION_FAILED","AUTHORIZATION_FAILED","JUSPAY_DECLINED","FAILURE","DECLINED"];
+  if (p.status && !p.action && !p._action && _HDFC_STATUSES.indexOf(String(p.status).toUpperCase()) !== -1) {
+    // Recover order_id if missing
+    if (!p.order_id) {
+      try {
+        const pending = JSON.parse(PropertiesService.getScriptProperties().getProperty("HDFC_PENDING_ORDERS") || "{}");
+        const keys = Object.keys(pending);
+        if (keys.length) {
+          keys.sort(function(a,b) { return (pending[b].ts||0) - (pending[a].ts||0); });
+          p.order_id = keys[0];
+        }
+      } catch(_) {}
+    }
     const params = Object.keys(p)
       .map(function(k) { return encodeURIComponent(k) + "=" + encodeURIComponent(p[k]); })
       .join("&");
     const redirectUrl = HDFC_ORDER_PAGE_URL + "?" + params;
     return HtmlService.createHtmlOutput(
       _hdfcReturnRedirectHtml(redirectUrl)
-    );
+    ).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
   }
   // ─────────────────────────────────────────────────────────────
 
@@ -495,30 +508,39 @@ function doPost(e) {
     const rawBody = e.postData ? e.postData.contents : "";
     let parsedForHdfc = {};
     try { parsedForHdfc = JSON.parse(rawBody); } catch(_) {}
-    const isHdfcReturn = parsedForHdfc.order_id && parsedForHdfc.status && !parsedForHdfc._action;
+
+    // Also check form-encoded params (Juspay may send application/x-www-form-urlencoded)
+    const formParams = e.parameter || {};
+
+    // Detect HDFC return: status param present, no _action, status is a known HDFC value.
+    // Check both JSON body and form params. HDFC UAT mock may omit order_id.
+    const _HDFC_STATUSES_P = ["CHARGED","SUCCESS","PENDING","PENDING_VBV","AUTHENTICATION_FAILED","AUTHORIZATION_FAILED","JUSPAY_DECLINED","FAILURE","DECLINED"];
+    const hdfcStatus = parsedForHdfc.status || formParams.status || "";
+    const hdfcOrderId = parsedForHdfc.order_id || formParams.order_id || "";
+    const hasAction = parsedForHdfc._action || formParams._action || formParams.action;
+    const isHdfcReturn = hdfcStatus && !hasAction && _HDFC_STATUSES_P.indexOf(String(hdfcStatus).toUpperCase()) !== -1;
+
     if (isHdfcReturn) {
-      const params = Object.keys(parsedForHdfc)
-        .map(k => encodeURIComponent(k) + "=" + encodeURIComponent(parsedForHdfc[k]))
+      // Merge all params from both sources
+      const allParams = Object.assign({}, formParams, parsedForHdfc);
+      // Recover order_id if missing
+      if (!allParams.order_id) {
+        try {
+          const pending = JSON.parse(PropertiesService.getScriptProperties().getProperty("HDFC_PENDING_ORDERS") || "{}");
+          const keys = Object.keys(pending);
+          if (keys.length) {
+            keys.sort(function(a,b) { return (pending[b].ts||0) - (pending[a].ts||0); });
+            allParams.order_id = keys[0];
+          }
+        } catch(_) {}
+      }
+      const params = Object.keys(allParams)
+        .map(k => encodeURIComponent(k) + "=" + encodeURIComponent(allParams[k]))
         .join("&");
       const redirectUrl = HDFC_ORDER_PAGE_URL + "?" + params;
       return HtmlService.createHtmlOutput(
-        `<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url=${redirectUrl}"></head>` +
-        `<body><script>window.location.replace(${JSON.stringify(redirectUrl)});</script>` +
-        `<p>Redirecting... <a href="${redirectUrl}">Click here if not redirected</a></p></body></html>`
-      );
-    }
-    // ── Also handle form-encoded POST (Juspay sometimes sends application/x-www-form-urlencoded)
-    if (!parsedForHdfc.order_id && e.postData && e.postData.type === "application/x-www-form-urlencoded") {
-      const formParams = e.parameter || {};
-      if (formParams.order_id && formParams.status) {
-        const params = Object.keys(formParams)
-          .map(k => encodeURIComponent(k) + "=" + encodeURIComponent(formParams[k]))
-          .join("&");
-        const redirectUrl = HDFC_ORDER_PAGE_URL + "?" + params;
-        return HtmlService.createHtmlOutput(
-          _hdfcReturnRedirectHtml(redirectUrl)
-        );
-      }
+        _hdfcReturnRedirectHtml(redirectUrl)
+      ).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
     }
     // ── Normal API actions ─────────────────────────────────────
     const body = JSON.parse(rawBody);
@@ -758,6 +780,17 @@ function doPost(e) {
       // Called by order.html when customer lands back after payment
       if (!PAYMENT_GATEWAY_ENABLED) return jsonRes({error:"Payment gateway not enabled."});
       return jsonRes(hdfc_verifyReturnPayload(body));
+    }
+
+    if (action === "hdfc_checkPaymentStatus") {
+      // Polling endpoint — order.html calls this periodically while waiting for
+      // HDFC to redirect back. Returns {status:"CHARGED"|"PENDING"|...} so the
+      // frontend can detect payment completion without relying on the redirect.
+      if (!PAYMENT_GATEWAY_ENABLED) return jsonRes({error:"Payment gateway not enabled."});
+      const oid = String(body.order_id || "").trim();
+      if (!oid) return jsonRes({error:"Missing order_id"});
+      const sc = hdfc_getOrderStatus(oid);
+      return jsonRes({ status: sc.status, confirmed: sc.confirmed, amount: sc.amount || 0 });
     }
     // ─────────────────────────────────────────────────────────
 

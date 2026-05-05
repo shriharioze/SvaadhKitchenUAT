@@ -4171,7 +4171,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.04.21.17-hdfc";
+    const APP_VERSION = "v26.05.05.1-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -7641,12 +7641,19 @@
      * Called once on DOMContentLoaded.
      * Fetches backend config to know if gateway is live.
      * Also checks if we just returned from an HDFC payment (return URL params).
+     * If URL params are missing but localStorage has a pending order, polls backend.
      */
     async function hdfc_init() {
       // 1. Check for return URL params first (customer coming back from HDFC)
       await hdfc_handleReturnParams();
 
-      // 2. Fetch gateway config from backend
+      // 2. If no URL params handled it, check localStorage for a pending HDFC order
+      //    and poll the backend for payment status. This is the PRIMARY recovery path
+      //    because Apps Script's sandboxed iframe often blocks the auto-redirect,
+      //    so the customer navigates back to order.html manually.
+      await hdfc_pollIfPending();
+
+      // 3. Fetch gateway config from backend
       try {
         const res  = await fetch(`${APPS_SCRIPT_URL}?action=getConfig`);
         const data = await res.json();
@@ -7657,6 +7664,136 @@
         S.gatewayEnabled = false;
         console.warn("Could not fetch gateway config:", e.message);
       }
+    }
+
+    /**
+     * If localStorage has a pending HDFC order_id AND hdfc_handleReturnParams
+     * didn't already handle it (S.hdfcPaymentVerified is still false),
+     * poll the backend for payment status. Shows a verification overlay while polling.
+     */
+    async function hdfc_pollIfPending() {
+      if (S.hdfcPaymentVerified) return; // Already handled via URL params
+
+      let pendingId;
+      try { pendingId = localStorage.getItem("svaadh_hdfc_pending_order"); } catch (_) {}
+      if (!pendingId) return;
+
+      console.log("HDFC poll: found pending order in localStorage:", pendingId);
+
+      // Show verification overlay
+      const overlay = document.createElement("div");
+      overlay.id = "hdfc-poll-overlay";
+      overlay.style.cssText = "position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;";
+      overlay.innerHTML = `
+        <div style="background:#fff;border-radius:18px;padding:40px 36px;text-align:center;
+                    max-width:340px;width:90%;box-shadow:0 8px 40px rgba(0,0,0,0.18);">
+          <div style="font-size:2.4rem;margin-bottom:16px;">
+            <svg width="48" height="48" viewBox="0 0 48 48" fill="none"
+                 style="animation:sk-spin 1s linear infinite;display:inline-block;"
+                 xmlns="http://www.w3.org/2000/svg">
+              <circle cx="24" cy="24" r="20" stroke="#eee" stroke-width="5"/>
+              <path d="M44 24a20 20 0 0 0-20-20" stroke="#c0392b" stroke-width="5" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div style="font-size:1.1rem;font-weight:700;color:#222;margin-bottom:8px;">
+            Checking Payment Status
+          </div>
+          <div id="hdfc-poll-msg" style="font-size:0.88rem;color:#666;line-height:1.5;">
+            Verifying your payment with HDFC…<br>Please wait.
+          </div>
+          <div style="margin-top:20px;">
+            <button onclick="hdfc_cancelPoll()" style="padding:10px 24px;background:#f5f5f5;border:1px solid #ddd;
+              border-radius:8px;font-size:0.85rem;color:#666;cursor:pointer;">
+              Cancel &amp; Start Fresh
+            </button>
+          </div>
+        </div>
+        <style>@keyframes sk-spin { to { transform: rotate(360deg); } }</style>`;
+      document.body.appendChild(overlay);
+
+      // Poll up to 8 times (every 3 seconds = ~24 seconds max)
+      let confirmed = false;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        if (S._hdfcPollCancelled) break;
+        try {
+          const res = await fetch(APPS_SCRIPT_URL, {
+            method: "POST",
+            body: JSON.stringify({ _action: "hdfc_checkPaymentStatus", order_id: pendingId })
+          });
+          const data = await res.json();
+          console.log(`HDFC poll attempt ${attempt + 1}:`, data.status);
+
+          if (data.confirmed) {
+            confirmed = true;
+            break;
+          }
+          if (data.status === "AUTHENTICATION_FAILED" || data.status === "AUTHORIZATION_FAILED" ||
+              data.status === "JUSPAY_DECLINED" || data.status === "FAILURE") {
+            // Payment definitively failed
+            overlay.remove();
+            try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch (_) {}
+            await sAlert(
+              "Your payment was not successful (Status: " + data.status + ").\n\nIf money was deducted, please WhatsApp us at +91 93222 46765 with order ID: " + pendingId,
+              "Payment Failed", "❌"
+            );
+            return;
+          }
+        } catch (e) {
+          console.warn("HDFC poll error:", e.message);
+        }
+        // Wait 3 seconds before next attempt
+        await new Promise(r => setTimeout(r, 3000));
+      }
+
+      overlay.remove();
+
+      if (confirmed) {
+        // Payment confirmed! Run the same flow as hdfc_handleReturnParams
+        let pendingData = null;
+        try {
+          const pendingRes = await fetch(APPS_SCRIPT_URL, {
+            method: "POST",
+            body: JSON.stringify({ _action: "hdfc_getPendingOrder", order_id: pendingId })
+          });
+          pendingData = await pendingRes.json();
+        } catch(_) {}
+
+        if (pendingData && pendingData.success) {
+          S.phone         = pendingData.phone         || S.phone || "";
+          S.orders        = pendingData.orders        || {};
+          S.selectedDates = pendingData.selectedDates || [];
+          S.profile       = pendingData.profile       || {};
+          S.mealAddrs     = pendingData.mealAddrs     || {};
+          S.isFirstTime   = pendingData.isFirstTime   || false;
+          S.grandTotal    = pendingData.amount        || 0;
+
+          S.hdfcPaymentVerified = true;
+          S.hdfcGatewayOrderId  = pendingId;
+          try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch (_) {}
+          await hdfc_submitVerifiedOrder(pendingId, "CHARGED");
+        } else {
+          try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch (_) {}
+          await sAlert(
+            "Payment confirmed!\n\nYour order ID: " + pendingId + "\n\nPlease WhatsApp us at +91 93222 46765 with this ID to confirm your order.",
+            "Payment Successful ✅", "🎉"
+          );
+        }
+      } else if (!S._hdfcPollCancelled) {
+        // Polling exhausted without confirmation — payment may still be processing
+        const el = document.getElementById("hdfc-poll-msg");
+        await sAlert(
+          "We couldn't confirm your payment yet. If you completed the payment, please wait a minute and refresh this page.\n\nOrder ID: " + pendingId + "\n\nIf money was deducted, WhatsApp us at +91 93222 46765.",
+          "Payment Pending", "⏳"
+        );
+      }
+    }
+
+    /** Called by Cancel button on the poll overlay */
+    function hdfc_cancelPoll() {
+      S._hdfcPollCancelled = true;
+      const ov = document.getElementById("hdfc-poll-overlay");
+      if (ov) ov.remove();
+      try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch (_) {}
     }
 
     /**
