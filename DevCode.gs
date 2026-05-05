@@ -783,11 +783,14 @@ function doPost(e) {
     }
 
     if (action === "hdfc_getMostRecentPending") {
-      // Returns the most recent pending HDFC order_id (regardless of phone).
-      // Used by order.html to recover from cross-origin localStorage loss
-      // when the customer lands back via Apps Script /exec URL after HDFC redirect.
+      // Returns the most recent pending HDFC order_id that is BOTH:
+      //   (a) <30 min old in HDFC_PENDING_ORDERS, AND
+      //   (b) NOT already present in SK_Orders sheet (i.e. truly unprocessed).
+      // This prevents the polling loop where a successfully-processed order's
+      // pending entry sticks around for 30 min and keeps re-triggering verification.
       try {
-        const pending = JSON.parse(PropertiesService.getScriptProperties().getProperty("HDFC_PENDING_ORDERS") || "{}");
+        const props   = PropertiesService.getScriptProperties();
+        const pending = JSON.parse(props.getProperty("HDFC_PENDING_ORDERS") || "{}");
         const phoneFilter = String(body.phone || "").trim();
         let candidates = Object.keys(pending);
         if (phoneFilter) {
@@ -795,13 +798,42 @@ function doPost(e) {
             return String(pending[k].phone || "").trim() === phoneFilter;
           });
         }
-        // Only consider entries from the last 30 minutes
         const now = Date.now();
         candidates = candidates.filter(function(k) { return (now - (pending[k].ts || 0)) < 30*60*1000; });
         if (!candidates.length) return jsonRes({ found: false });
         candidates.sort(function(a,b) { return (pending[b].ts||0) - (pending[a].ts||0); });
-        const oid = candidates[0];
-        return jsonRes({ found: true, order_id: oid, ts: pending[oid].ts, phone: pending[oid].phone });
+
+        // Check SK_Orders sheet for already-processed orders. If the most-recent
+        // pending order is already in the sheet, drop it from pending and try the next.
+        const ss = getSpreadsheet();
+        const ordersWs = getOrCreateTab(ss, TAB_ORDERS, []);
+        const ordersData = ordersWs.getDataRange().getValues();
+        const headers = ordersData[0] || [];
+        const gatewayCol = headers.indexOf("Gateway_Order_ID");
+        const processedIds = new Set();
+        if (gatewayCol !== -1) {
+          for (let r = 1; r < ordersData.length; r++) {
+            const v = String(ordersData[r][gatewayCol] || "").trim();
+            if (v) processedIds.add(v);
+          }
+        }
+
+        let dirty = false;
+        for (let i = 0; i < candidates.length; i++) {
+          const oid = candidates[i];
+          if (processedIds.has(oid)) {
+            // Already in sheet → clean up the pending entry so it stops re-triggering
+            delete pending[oid];
+            dirty = true;
+            continue;
+          }
+          // Truly unprocessed → return it
+          if (dirty) props.setProperty("HDFC_PENDING_ORDERS", JSON.stringify(pending));
+          return jsonRes({ found: true, order_id: oid, ts: pending[oid].ts, phone: pending[oid].phone });
+        }
+        // All candidates were already processed
+        if (dirty) props.setProperty("HDFC_PENDING_ORDERS", JSON.stringify(pending));
+        return jsonRes({ found: false });
       } catch(e) {
         return jsonRes({ found: false, error: e.message });
       }
