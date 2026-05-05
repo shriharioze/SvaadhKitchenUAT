@@ -279,49 +279,72 @@ const BUSINESS_CONTEXT = {
 function _hdfcReturnRedirectHtml(redirectUrl) {
   // Defensive defaults — never return blank, always navigate somewhere.
   const safeUrl = String(redirectUrl || "https://shriharioze.github.io/SvaadhKitchenUAT/order.html");
-  let action = safeUrl, queryString = "";
-  const idx = safeUrl.indexOf("?");
-  if (idx !== -1) { action = safeUrl.substring(0, idx); queryString = safeUrl.substring(idx + 1); }
+  const safeUrlAttr = safeUrl.replace(/"/g, "&quot;");
+  const safeUrlJs   = JSON.stringify(safeUrl);
 
-  let inputs = "";
-  if (queryString) {
-    queryString.split("&").forEach(function(pair) {
-      if (!pair) return;
-      const eq = pair.indexOf("=");
-      const k = eq === -1 ? pair : pair.substring(0, eq);
-      let   v = eq === -1 ? ""   : pair.substring(eq + 1);
-      try { v = decodeURIComponent(v.replace(/\+/g, " ")); } catch (_) { /* keep raw */ }
-      const safeK = String(k).replace(/"/g, "&quot;").replace(/</g, "&lt;");
-      const safeV = String(v).replace(/"/g, "&quot;").replace(/</g, "&lt;");
-      inputs += '<input type="hidden" name="' + safeK + '" value="' + safeV + '">';
-    });
-  }
-
-  // Triple-fallback navigation:
-  //   1. Form auto-submit on body load (most reliable, breaks out of iframe sandbox)
-  //   2. window.top.location.href via JS after 200ms (in case form submit blocked)
-  //   3. Visible Continue button users can click manually
-  return '<!DOCTYPE html><html><head><title>Redirecting…</title>' +
-         '<meta http-equiv="refresh" content="2;url=' + safeUrl.replace(/"/g, "&quot;") + '">' +
-         '</head>' +
-         '<body onload="document.getElementById(\'r\').submit();" ' +
-              'style="font-family:system-ui,Arial,sans-serif;text-align:center;padding:60px 20px;background:#fef9f6;">' +
-         '<form id="r" action="' + action.replace(/"/g, "&quot;") + '" method="GET" target="_top">' + inputs + '</form>' +
+  // Apps Script HtmlService renders inside a sandboxed iframe with
+  //   sandbox="allow-top-navigation-BY-USER-ACTIVATION"
+  // which means automatic window.top.location / form-auto-submit / meta-refresh
+  // are BLOCKED. The user MUST click/tap something to navigate the top frame.
+  //
+  // Strategy: make the ENTIRE viewport a giant click target. We still attempt
+  // auto-navigation (in case the host browser is permissive), but rely on the
+  // first user gesture (click/tap/keypress) to fire the navigation reliably.
+  return '<!DOCTYPE html><html><head><title>Returning to Svaadh Kitchen…</title>' +
+         '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+         '<meta http-equiv="refresh" content="0;url=' + safeUrlAttr + '">' +
+         '<style>' +
+         '  *{box-sizing:border-box;margin:0;padding:0;}' +
+         '  html,body{height:100%;font-family:system-ui,-apple-system,Segoe UI,Arial,sans-serif;}' +
+         '  body{background:#fef9f6;}' +
+         '  a.full{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;' +
+         '    justify-content:center;text-decoration:none;color:inherit;cursor:pointer;' +
+         '    background:linear-gradient(180deg,#fef9f6 0%,#ffe6dc 100%);}' +
+         '  .ring{width:64px;height:64px;border-radius:50%;border:5px solid #f5cba7;' +
+         '    border-top-color:#c0392b;animation:spin 1s linear infinite;margin-bottom:24px;}' +
+         '  @keyframes spin{to{transform:rotate(360deg);}}' +
+         '  .t1{font-size:1.4rem;font-weight:800;color:#c0392b;margin-bottom:6px;}' +
+         '  .t2{font-size:0.95rem;color:#555;margin-bottom:32px;text-align:center;padding:0 20px;}' +
+         '  .cta{display:inline-block;padding:18px 44px;background:#c0392b;color:#fff;' +
+         '    border-radius:14px;font-weight:700;font-size:1.1rem;letter-spacing:0.3px;' +
+         '    box-shadow:0 8px 24px rgba(192,57,43,0.35);animation:pulse 1.6s ease-in-out infinite;}' +
+         '  @keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.04);}}' +
+         '  .hint{margin-top:16px;font-size:0.78rem;color:#888;}' +
+         '</style></head>' +
+         '<body>' +
+         // The whole screen is a clickable link with target="_top" — first click
+         // anywhere navigates the top frame (which IS allowed under user activation).
+         '<a class="full" href="' + safeUrlAttr + '" target="_top" id="goLink">' +
+         '  <div class="ring"></div>' +
+         '  <div class="t1">Payment Received ✓</div>' +
+         '  <div class="t2">Tap anywhere to view your order confirmation</div>' +
+         '  <div class="cta">Continue to Order →</div>' +
+         '  <div class="hint">If nothing happens automatically, please tap the screen.</div>' +
+         '</a>' +
          '<script>' +
-         '  setTimeout(function(){' +
-         '    try { document.getElementById("r").submit(); } catch(_){}' +
-         '    try { window.top.location.href = ' + JSON.stringify(safeUrl) + '; } catch(_){}' +
-         '  }, 200);' +
+         // Try auto-navigation as soon as the page loads (in case sandbox permits it).
+         '  (function(){' +
+         '    var URL=' + safeUrlJs + ';' +
+         '    function go(){try{window.top.location.replace(URL);}catch(e){try{window.top.location.href=URL;}catch(_){window.location.href=URL;}}}' +
+         // Attempt 1: synchronous (may work in some browsers)
+         '    try{window.top.location.replace(URL);}catch(_){}' +
+         // Attempt 2: after a tick
+         '    setTimeout(go,50);' +
+         // Attempt 3: after 500ms (in case top-frame is still settling)
+         '    setTimeout(go,500);' +
+         // Attempt 4: hijack the FIRST user gesture of any kind to trigger navigation
+         '    function onFirstGesture(){' +
+         '      try{document.getElementById("goLink").click();}catch(_){}' +
+         '      go();' +
+         '      ["click","touchstart","keydown","mousedown","pointerdown","scroll"].forEach(function(ev){' +
+         '        document.removeEventListener(ev,onFirstGesture,true);' +
+         '      });' +
+         '    }' +
+         '    ["click","touchstart","keydown","mousedown","pointerdown","scroll"].forEach(function(ev){' +
+         '      document.addEventListener(ev,onFirstGesture,true);' +
+         '    });' +
+         '  })();' +
          '</script>' +
-         '<div style="font-size:1.2rem;color:#0f766e;font-weight:700;margin-bottom:10px;">Returning to Svaadh Kitchen…</div>' +
-         '<p style="color:#666;font-size:0.9rem;margin-bottom:24px;">Confirming your payment</p>' +
-         '<p>' +
-         '  <a href="' + safeUrl.replace(/"/g, "&quot;") + '" target="_top" ' +
-         '     style="display:inline-block;padding:14px 28px;background:#0891b2;color:#fff;' +
-                    'text-decoration:none;border-radius:8px;font-weight:600;font-size:1rem;">' +
-         '    Continue to Order →' +
-         '  </a>' +
-         '</p>' +
          '</body></html>';
 }
 
@@ -6007,22 +6030,14 @@ function hdfc_createSession(body) {
     customer_email:         phone + "@svaadh.noemail",
     payment_page_client_id: HDFC_MERCHANT_ID,
     action:                 "paymentPage",
-    // ── return_url: where the customer's BROWSER lands after payment.
-    //    Point directly to GitHub Pages so we skip the Apps Script iframe
-    //    entirely. The iframe sandbox blocks auto top-navigation, which is
-    //    why customers were stuck on script.google.com URLs even when
-    //    everything technically worked. GitHub Pages is static + serves GET,
-    //    which is all HDFC sends to return_url for browser redirect.
-    return_url:             HDFC_ORDER_PAGE_URL,
+    return_url:             HDFC_RETURN_URL,
     description:            description,
     first_name:             name.split(" ")[0] || name,
     last_name:              name.split(" ").slice(1).join(" ") || "",
     udf1:                   phone,
     udf3:                   "svaadh_kitchen",
     // udf2 intentionally omitted — blocked by HDFC for tokenization compliance
-    // ── notification_url: server-to-server webhook (POST). Stays on Apps
-    //    Script /exec because GitHub Pages is static and would 405 on POST.
-    notification_url:       HDFC_RETURN_URL
+    notification_url:       HDFC_RETURN_URL   // webhook URL per-session (fallback if dashboard not set)
   };
 
   // Juspay Basic Auth: base64(api_key + ":") — API key as username, empty password
