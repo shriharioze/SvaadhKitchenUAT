@@ -6007,14 +6007,22 @@ function hdfc_createSession(body) {
     customer_email:         phone + "@svaadh.noemail",
     payment_page_client_id: HDFC_MERCHANT_ID,
     action:                 "paymentPage",
-    return_url:             HDFC_RETURN_URL,
+    // ── return_url: where the customer's BROWSER lands after payment.
+    //    Point directly to GitHub Pages so we skip the Apps Script iframe
+    //    entirely. The iframe sandbox blocks auto top-navigation, which is
+    //    why customers were stuck on script.google.com URLs even when
+    //    everything technically worked. GitHub Pages is static + serves GET,
+    //    which is all HDFC sends to return_url for browser redirect.
+    return_url:             HDFC_ORDER_PAGE_URL,
     description:            description,
     first_name:             name.split(" ")[0] || name,
     last_name:              name.split(" ").slice(1).join(" ") || "",
     udf1:                   phone,
     udf3:                   "svaadh_kitchen",
     // udf2 intentionally omitted — blocked by HDFC for tokenization compliance
-    notification_url:       HDFC_RETURN_URL   // webhook URL per-session (fallback if dashboard not set)
+    // ── notification_url: server-to-server webhook (POST). Stays on Apps
+    //    Script /exec because GitHub Pages is static and would 405 on POST.
+    notification_url:       HDFC_RETURN_URL
   };
 
   // Juspay Basic Auth: base64(api_key + ":") — API key as username, empty password
