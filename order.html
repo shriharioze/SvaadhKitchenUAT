@@ -4193,7 +4193,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.05.3-hdfc";
+    const APP_VERSION = "v26.05.05.4-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -7697,7 +7697,25 @@
       if (S.hdfcPaymentVerified) return; // Already handled via URL params
 
       let pendingId;
-      try { pendingId = localStorage.getItem("svaadh_hdfc_pending_order"); } catch (_) {}
+      try {
+        pendingId = localStorage.getItem("svaadh_hdfc_pending_order");
+        // Stale-entry guard: if entry is older than 30 minutes, treat as ghost
+        // (e.g. cross-origin success flow ran yesterday and never cleared this).
+        const ts = parseInt(localStorage.getItem("svaadh_hdfc_pending_ts") || "0", 10);
+        if (pendingId && ts && (Date.now() - ts) > 30 * 60 * 1000) {
+          console.log("HDFC poll: discarding stale localStorage entry (age >30min):", pendingId);
+          localStorage.removeItem("svaadh_hdfc_pending_order");
+          localStorage.removeItem("svaadh_hdfc_pending_ts");
+          pendingId = null;
+        }
+        // If timestamp is missing entirely (legacy entries), discard too —
+        // they predate this safeguard and are likely already-processed ghosts.
+        if (pendingId && !ts) {
+          console.log("HDFC poll: discarding legacy localStorage entry (no timestamp):", pendingId);
+          localStorage.removeItem("svaadh_hdfc_pending_order");
+          pendingId = null;
+        }
+      } catch (_) {}
 
       // ── Cross-origin recovery ───────────────────────────────────────────
       // localStorage is per-origin. If customer was redirected back via the
@@ -7789,7 +7807,7 @@
               data.status === "JUSPAY_DECLINED" || data.status === "FAILURE") {
             // Payment definitively failed
             overlay.remove();
-            try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch (_) {}
+            try { localStorage.removeItem("svaadh_hdfc_pending_order"); localStorage.removeItem("svaadh_hdfc_pending_ts"); } catch (_) {}
             await sAlert(
               "Your payment was not successful (Status: " + data.status + ").\n\nIf money was deducted, please WhatsApp us at +91 93222 46765 with order ID: " + pendingId,
               "Payment Failed", "❌"
@@ -7827,14 +7845,18 @@
 
           S.hdfcPaymentVerified = true;
           S.hdfcGatewayOrderId  = pendingId;
-          try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch (_) {}
+          try { localStorage.removeItem("svaadh_hdfc_pending_order"); localStorage.removeItem("svaadh_hdfc_pending_ts"); } catch (_) {}
           await hdfc_submitVerifiedOrder(pendingId, "CHARGED");
         } else {
-          try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch (_) {}
-          await sAlert(
-            "Payment confirmed!\n\nYour order ID: " + pendingId + "\n\nPlease WhatsApp us at +91 93222 46765 with this ID to confirm your order.",
-            "Payment Successful ✅", "🎉"
-          );
+          // Backend has no pending entry. This usually means:
+          //   (a) the order was already processed earlier (likely a localStorage ghost
+          //       from a previous session — already in sheet, no action needed), OR
+          //   (b) the pending entry expired (>30 min) before we could complete.
+          // Either way, do NOT show "Payment Successful" — it would be misleading.
+          // The order either already exists in the sheet or genuinely needs manual help.
+          try { localStorage.removeItem("svaadh_hdfc_pending_order"); localStorage.removeItem("svaadh_hdfc_pending_ts"); } catch (_) {}
+          console.log("HDFC poll: backend has no pending entry for", pendingId, "— likely already processed earlier. Skipping success modal.");
+          // Silent cleanup — don't disturb the user with a confusing modal
         }
       } else if (!S._hdfcPollCancelled) {
         // Polling exhausted without confirmation — payment may still be processing
@@ -7851,7 +7873,7 @@
       S._hdfcPollCancelled = true;
       const ov = document.getElementById("hdfc-poll-overlay");
       if (ov) ov.remove();
-      try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch (_) {}
+      try { localStorage.removeItem("svaadh_hdfc_pending_order"); localStorage.removeItem("svaadh_hdfc_pending_ts"); } catch (_) {}
     }
 
     /**
@@ -7904,7 +7926,10 @@
       // Also persist tempId to localStorage so we can recover it on return
       // even if HDFC's return URL doesn't include order_id (some HDFC test
       // mocks omit it, sending only status + signature).
-      try { localStorage.setItem("svaadh_hdfc_pending_order", tempId); } catch (_) {}
+      try {
+        localStorage.setItem("svaadh_hdfc_pending_order", tempId);
+        localStorage.setItem("svaadh_hdfc_pending_ts", String(Date.now()));
+      } catch (_) {}
       try {
         await fetch(APPS_SCRIPT_URL, {
           method: "POST",
@@ -8048,7 +8073,7 @@
             S.hdfcPaymentVerified = true;
             S.hdfcGatewayOrderId  = orderId;
             // Clear pending-order localStorage entry now that we've handled it
-            try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch (_) {}
+            try { localStorage.removeItem("svaadh_hdfc_pending_order"); localStorage.removeItem("svaadh_hdfc_pending_ts"); } catch (_) {}
             // Remove loading overlay — showSuccess will take over the screen
             verifyOverlay.remove();
             await hdfc_submitVerifiedOrder(orderId, status);
