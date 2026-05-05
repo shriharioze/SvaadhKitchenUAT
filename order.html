@@ -8,11 +8,14 @@
   <meta name="author" content="Svaadh Kitchen">
 
   <!-- ═══════════════════════════════════════════════════════════════════
-       TOP-OF-PAGE REDIRECT GUARD
-       If this page is loaded on the Apps Script /exec URL (which happens
-       when HDFC redirects back to our return_url), force-navigate to the
-       canonical GitHub Pages URL immediately. Forwards any URL params
-       (e.g. order_id, status) so the success-modal flow runs there.
+       TOP-OF-PAGE REDIRECT GUARD + EARLY LOADING OVERLAY
+       1. If this page is loaded on the Apps Script /exec URL, force-navigate
+          to the canonical GitHub Pages URL with all query params intact.
+       2. If we detect a pending HDFC payment (URL params OR localStorage),
+          inject a full-screen loading overlay IMMEDIATELY so the customer
+          never sees the order-step-1 flicker before the verification kicks in.
+          The overlay is removed by hdfc_pollIfPending / hdfc_handleReturnParams
+          when verification completes (or fails).
        Runs BEFORE everything else so the wrong-URL page never fully renders.
        ═══════════════════════════════════════════════════════════════════ -->
   <script>
@@ -22,10 +25,55 @@
         if (h.indexOf("script.google.com") !== -1 || h.indexOf("googleusercontent.com") !== -1) {
           var qs = window.location.search || "";
           var target = "https://shriharioze.github.io/SvaadhKitchenUAT/order.html" + qs;
-          // Use replace so the wrong URL doesn't pollute history
           try { window.top.location.replace(target); } catch(_) { window.location.replace(target); }
+          return;
         }
       } catch(_) {}
+
+      // Detect HDFC return signal — URL params OR fresh localStorage entry
+      var hasReturnParams = false;
+      try {
+        var sp = new URLSearchParams(window.location.search);
+        hasReturnParams = !!(sp.get("hdfc_status") || sp.get("status") ||
+                             sp.get("hdfc_order_id") || sp.get("order_id"));
+      } catch(_) {}
+
+      var hasFreshPending = false;
+      try {
+        var pid = localStorage.getItem("svaadh_hdfc_pending_order");
+        var pts = parseInt(localStorage.getItem("svaadh_hdfc_pending_ts") || "0", 10);
+        // Only show overlay for fresh entries (<30 min) WITH timestamp
+        hasFreshPending = !!(pid && pts && (Date.now() - pts) < 30 * 60 * 1000);
+      } catch(_) {}
+
+      if (hasReturnParams || hasFreshPending) {
+        // Inject the overlay HTML directly so it appears before body renders.
+        // Use document.write since we're still in <head> parsing.
+        document.write(
+          '<style>' +
+          '  #hdfc-early-overlay{position:fixed;inset:0;z-index:99999;' +
+          '    background:rgba(0,0,0,0.55);display:flex;align-items:center;' +
+          '    justify-content:center;font-family:system-ui,Arial,sans-serif;}' +
+          '  #hdfc-early-overlay .box{background:#fff;border-radius:18px;' +
+          '    padding:40px 36px;text-align:center;max-width:340px;width:90%;' +
+          '    box-shadow:0 8px 40px rgba(0,0,0,0.18);}' +
+          '  @keyframes sk-spin{to{transform:rotate(360deg);}}' +
+          '</style>' +
+          '<div id="hdfc-early-overlay"><div class="box">' +
+          '  <svg width="48" height="48" viewBox="0 0 48 48" fill="none"' +
+          '       style="animation:sk-spin 1s linear infinite;display:inline-block;margin-bottom:16px;">' +
+          '    <circle cx="24" cy="24" r="20" stroke="#eee" stroke-width="5"/>' +
+          '    <path d="M44 24a20 20 0 0 0-20-20" stroke="#c0392b" stroke-width="5" stroke-linecap="round"/>' +
+          '  </svg>' +
+          '  <div style="font-size:1.1rem;font-weight:700;color:#222;margin-bottom:8px;">' +
+          '    Checking Payment Status' +
+          '  </div>' +
+          '  <div style="font-size:0.88rem;color:#666;line-height:1.5;">' +
+          '    Verifying your payment with HDFC…<br>Please don\'t close this window.' +
+          '  </div>' +
+          '</div></div>'
+        );
+      }
     })();
   </script>
 
@@ -4193,7 +4241,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.05.5-hdfc";
+    const APP_VERSION = "v26.05.05.6-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -7666,14 +7714,28 @@
      * If URL params are missing but localStorage has a pending order, polls backend.
      */
     async function hdfc_init() {
+      // Helper: remove the early overlay injected by the top-of-head script
+      // (used by both the URL-param and polling paths once we hand off to their
+      // own overlays / success modals).
+      const _removeEarlyOverlay = () => {
+        const el = document.getElementById("hdfc-early-overlay");
+        if (el) el.remove();
+      };
+
       // 1. Check for return URL params first (customer coming back from HDFC)
       await hdfc_handleReturnParams();
+      // If hdfc_handleReturnParams kicked in, it will have shown its own overlay.
+      // Either way we're past the early overlay's job.
+      _removeEarlyOverlay();
 
       // 2. If no URL params handled it, check localStorage for a pending HDFC order
       //    and poll the backend for payment status. This is the PRIMARY recovery path
       //    because Apps Script's sandboxed iframe often blocks the auto-redirect,
       //    so the customer navigates back to order.html manually.
       await hdfc_pollIfPending();
+      // Polling either showed its own overlay (which it removes when done) or
+      // returned without doing anything. Either way ensure the early overlay is gone.
+      _removeEarlyOverlay();
 
       // 3. Fetch gateway config from backend
       try {
