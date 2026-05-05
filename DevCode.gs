@@ -782,6 +782,31 @@ function doPost(e) {
       return jsonRes(hdfc_verifyReturnPayload(body));
     }
 
+    if (action === "hdfc_getMostRecentPending") {
+      // Returns the most recent pending HDFC order_id (regardless of phone).
+      // Used by order.html to recover from cross-origin localStorage loss
+      // when the customer lands back via Apps Script /exec URL after HDFC redirect.
+      try {
+        const pending = JSON.parse(PropertiesService.getScriptProperties().getProperty("HDFC_PENDING_ORDERS") || "{}");
+        const phoneFilter = String(body.phone || "").trim();
+        let candidates = Object.keys(pending);
+        if (phoneFilter) {
+          candidates = candidates.filter(function(k) {
+            return String(pending[k].phone || "").trim() === phoneFilter;
+          });
+        }
+        // Only consider entries from the last 30 minutes
+        const now = Date.now();
+        candidates = candidates.filter(function(k) { return (now - (pending[k].ts || 0)) < 30*60*1000; });
+        if (!candidates.length) return jsonRes({ found: false });
+        candidates.sort(function(a,b) { return (pending[b].ts||0) - (pending[a].ts||0); });
+        const oid = candidates[0];
+        return jsonRes({ found: true, order_id: oid, ts: pending[oid].ts, phone: pending[oid].phone });
+      } catch(e) {
+        return jsonRes({ found: false, error: e.message });
+      }
+    }
+
     if (action === "hdfc_checkPaymentStatus") {
       // Polling endpoint — order.html calls this periodically while waiting for
       // HDFC to redirect back. Returns {status:"CHARGED"|"PENDING"|...} so the

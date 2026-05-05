@@ -4171,7 +4171,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.05.1-hdfc";
+    const APP_VERSION = "v26.05.05.2-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -7676,9 +7676,45 @@
 
       let pendingId;
       try { pendingId = localStorage.getItem("svaadh_hdfc_pending_order"); } catch (_) {}
+
+      // ── Cross-origin recovery ───────────────────────────────────────────
+      // localStorage is per-origin. If customer was redirected back via the
+      // Apps Script /exec URL (different origin than github.io), localStorage
+      // is empty there. Query backend for the most recent pending order as
+      // a fallback. Backend returns one only if it's <30 min old.
+      if (!pendingId) {
+        try {
+          const res = await fetch(APPS_SCRIPT_URL, {
+            method: "POST",
+            body: JSON.stringify({ _action: "hdfc_getMostRecentPending" })
+          });
+          const data = await res.json();
+          if (data && data.found && data.order_id) {
+            pendingId = data.order_id;
+            console.log("HDFC poll: recovered pending order from backend:", pendingId);
+            // Save it back to this origin's localStorage for any future reload
+            try { localStorage.setItem("svaadh_hdfc_pending_order", pendingId); } catch(_) {}
+          }
+        } catch(_) {}
+      }
+
       if (!pendingId) return;
 
-      console.log("HDFC poll: found pending order in localStorage:", pendingId);
+      // ── Auto-redirect from Apps Script URL to GitHub Pages ──────────────
+      // If we're on script.google.com (Apps Script /exec URL) and have a pending
+      // order, redirect to the canonical GitHub Pages URL where the user's full
+      // localStorage cart history etc. lives. This eliminates the wrong-URL
+      // post-payment landing problem.
+      if (window.location.hostname.indexOf("script.google.com") !== -1 ||
+          window.location.hostname.indexOf("googleusercontent.com") !== -1) {
+        const target = "https://shriharioze.github.io/SvaadhKitchenUAT/order.html?hdfc_order_id=" +
+                       encodeURIComponent(pendingId) + "&hdfc_status=CHARGED";
+        console.log("HDFC poll: auto-redirecting from Apps Script to GitHub Pages →", target);
+        try { window.top.location.href = target; } catch(_) { window.location.href = target; }
+        return;
+      }
+
+      console.log("HDFC poll: found pending order:", pendingId);
 
       // Show verification overlay
       const overlay = document.createElement("div");
