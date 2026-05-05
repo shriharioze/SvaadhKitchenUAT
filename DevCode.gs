@@ -691,6 +691,16 @@ function doPost(e) {
     if (action === "getReviews") return jsonRes(getReviews());
     if (action === "chat") return jsonRes(handleChat(body));
     if (action === "submitWalletRecharge") return jsonRes(submitWalletRecharge(body));
+
+    // ── HDFC gateway-based wallet recharge ────────────────────────────────
+    if (action === "hdfc_createWalletRechargeSession") {
+      if (!PAYMENT_GATEWAY_ENABLED) return jsonRes({error:"Payment gateway not enabled."});
+      return jsonRes(hdfc_createWalletRechargeSession(body));
+    }
+    if (action === "hdfc_finalizeWalletRecharge") {
+      if (!PAYMENT_GATEWAY_ENABLED) return jsonRes({error:"Payment gateway not enabled."});
+      return jsonRes(hdfc_finalizeWalletRecharge(body.order_id));
+    }
     if (action === "payAllPendingWithWallet") return jsonRes(payAllPendingWithWallet(body));
     if (action === "markRefundRejected") {
       if (!isAdmin) return jsonRes({error:"STRICT ADMIN PIN REQUIRED"});
@@ -4778,16 +4788,178 @@ function markEnRoute(body) {
 
 // ── WALLET TOPUP LOGIC ────────────────────────────────────────────────────────
 function submitWalletRecharge(body) {
-  var phone  = String(body.phone || "").trim();
+  var phone  = _normalizePhone(body.phone || "");
   var name   = String(body.name || "").trim();
   var amount = Number(body.amount);
-  if (!phone || isNaN(amount) || amount <= 0) return {success:false, error:"Invalid amount or phone"};
+
+  // ── Tamper guard: bounds + phone validation ──────────────────────────────
+  // Manual UPI recharge — admin still verifies in bank, but we enforce sane
+  // bounds here to prevent absurd entries (e.g. ₹99,999,999 from Burp tampering).
+  if (!phone || phone.length !== 10) return {success:false, error:"Invalid phone"};
+  if (isNaN(amount) || !Number.isFinite(amount)) return {success:false, error:"Invalid amount"};
+  amount = Math.round(amount); // no fractional rupees
+  if (amount < 100)   return {success:false, error:"Minimum recharge is ₹100"};
+  if (amount > 50000) return {success:false, error:"Maximum recharge per request is ₹50,000"};
+
+  // Customer name from sheet (don't trust body.name verbatim either)
+  try {
+    const cRow = _findCustomerRow(getSpreadsheet(), phone);
+    if (cRow && cRow.Customer_Name) name = String(cRow.Customer_Name).trim();
+  } catch(_) {}
 
   // Unverified entry requiring admin to flip to TRUE
   const rechargeRef = "RCH-" + Utilities.formatDate(getISTDate(), "Asia/Kolkata", "yyyyMMdd-HHmmss") + "-" + phone.slice(-4);
   _appendWalletTransaction(phone, name, "Recharge", amount, false, rechargeRef);
-  
-  return {success:true};
+
+  console.log("submitWalletRecharge: " + phone + " requested ₹" + amount + " (ref " + rechargeRef + ")");
+  return {success:true, ref: rechargeRef, amount: amount};
+}
+
+/**
+ * Create an HDFC SmartGateway session for a wallet TOP-UP (not order payment).
+ * Server-authoritative amount: validated against bounds, used as the source of truth.
+ * Client-supplied amount is logged but is the same as request — bounds enforced here.
+ *
+ * On successful payment, hdfc_finalizeWalletRecharge() must be called (via webhook
+ * OR the customer's return-flow) to credit the wallet. That function calls the HDFC
+ * Status API to get the ACTUAL charged amount and credits exactly that amount —
+ * tampering the client-submitted amount has no effect because we trust HDFC's API.
+ */
+function hdfc_createWalletRechargeSession(body) {
+  if (!PAYMENT_GATEWAY_ENABLED) return { error: "Gateway not enabled." };
+
+  const phone = _normalizePhone(body.phone || "");
+  let   amount = Number(body.amount);
+
+  // ── Server-side bounds validation (mirrors submitWalletRecharge) ─────────
+  if (!phone || phone.length !== 10)              return { error: "Invalid phone" };
+  if (isNaN(amount) || !Number.isFinite(amount))  return { error: "Invalid amount" };
+  amount = Math.round(amount);
+  if (amount < 100)   return { error: "Minimum recharge is ₹100" };
+  if (amount > 50000) return { error: "Maximum recharge per request is ₹50,000" };
+
+  // Customer name from sheet
+  let name = String(body.name || "Customer").trim();
+  try {
+    const cRow = _findCustomerRow(getSpreadsheet(), phone);
+    if (cRow && cRow.Customer_Name) name = String(cRow.Customer_Name).trim();
+  } catch(_) {}
+
+  // Generate non-sequential gateway order ID, distinguished by 'W' (wallet topup).
+  const now      = new Date();
+  const datePart = String(now.getFullYear()).slice(-2)
+                 + String(now.getMonth()+1).padStart(2,"0")
+                 + String(now.getDate()).padStart(2,"0");
+  const rand     = Utilities.getUuid().replace(/-/g,"").toUpperCase().slice(0,9);
+  const orderId  = "SK" + datePart + "W" + rand;
+
+  // Persist a recharge-pending entry so the return/webhook flow can credit later
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const raw   = props.getProperty("HDFC_PENDING_RECHARGES") || "{}";
+    const pending = JSON.parse(raw);
+    // Expire entries older than 30 minutes
+    const nowMs = Date.now();
+    Object.keys(pending).forEach(function(k) {
+      if (nowMs - (pending[k].ts || 0) > 30*60*1000) delete pending[k];
+    });
+    pending[orderId] = { ts: nowMs, phone: phone, name: name, amount: amount };
+    props.setProperty("HDFC_PENDING_RECHARGES", JSON.stringify(pending));
+  } catch(e) { /* non-fatal */ }
+
+  const payload = {
+    order_id:               orderId,
+    amount:                 amount,
+    currency:               "INR",
+    customer_id:            phone,
+    customer_phone:         phone,
+    customer_email:         phone + "@svaadh.noemail",
+    payment_page_client_id: HDFC_MERCHANT_ID,
+    action:                 "paymentPage",
+    return_url:             HDFC_RETURN_URL,
+    description:            "Svaadh Kitchen — Wallet Recharge ₹" + amount,
+    first_name:             name.split(" ")[0] || name,
+    last_name:              name.split(" ").slice(1).join(" ") || "",
+    udf1:                   phone,
+    udf3:                   "svaadh_kitchen_recharge",
+    notification_url:       HDFC_RETURN_URL
+  };
+
+  try {
+    const authToken = Utilities.base64Encode(HDFC_API_KEY + ":");
+    const apiUrl = (HDFC_ENV === "live" ? HDFC_LIVE_URL : HDFC_TEST_URL) + "/session";
+    const resp = UrlFetchApp.fetch(apiUrl, {
+      method: "post",
+      contentType: "application/json",
+      headers: { "Authorization": "Basic " + authToken, "x-merchantid": HDFC_MERCHANT_ID },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+    const respBody = JSON.parse(resp.getContentText());
+    if (!respBody.payment_links || !respBody.payment_links.web) {
+      console.error("hdfc_createWalletRechargeSession: no payment URL", respBody);
+      return { error: "HDFC returned no payment URL." };
+    }
+    return { success: true, payment_url: respBody.payment_links.web, order_id: orderId, amount: amount };
+  } catch(err) {
+    console.error("hdfc_createWalletRechargeSession error:", err.message);
+    return { error: err.message };
+  }
+}
+
+/**
+ * Finalise a wallet recharge after gateway payment. Called by:
+ *   (a) The webhook (hdfc_handleWebhook) when ORDER_SUCCEEDED for a *_W_* order
+ *   (b) The customer return-flow on order.html via _action=hdfc_verifyRecharge
+ *
+ * Crucially: we ALWAYS call HDFC Status API and credit the ACTUAL charged amount.
+ * If the customer tampered request amount, HDFC charged the gateway-validated amount;
+ * Status API returns that real amount; we credit exactly that. Untamperable.
+ */
+function hdfc_finalizeWalletRecharge(orderId) {
+  const oid = String(orderId || "").trim();
+  if (!oid) return { error: "order_id required" };
+  if (oid.indexOf("W") === -1) return { error: "Not a wallet-recharge order" };
+
+  // Idempotency: check if already credited
+  try {
+    const wsAll = getOrCreateTab(getSpreadsheet(), TAB_WALLET, WALLET_HEADERS).getDataRange().getValues();
+    const refCol = (wsAll[0] || []).indexOf("Ref_Code");
+    if (refCol !== -1) {
+      for (let i = 1; i < wsAll.length; i++) {
+        if (String(wsAll[i][refCol] || "").trim() === oid) {
+          return { success: true, already_credited: true, message: "Already credited" };
+        }
+      }
+    }
+  } catch(_) {}
+
+  // Mandatory Status API check — single source of truth for charged amount
+  const statusCheck = hdfc_getOrderStatus(oid);
+  if (!statusCheck.confirmed) {
+    return { error: "Payment not confirmed by gateway. Status: " + statusCheck.status };
+  }
+  const chargedAmount = Math.round(Number(statusCheck.amount || 0));
+  if (chargedAmount <= 0) {
+    return { error: "Gateway reports zero charged amount." };
+  }
+
+  // Look up phone/name from pending entry (or recover from Status API customer_id)
+  let phone = "", name = "Customer";
+  try {
+    const pending = JSON.parse(PropertiesService.getScriptProperties().getProperty("HDFC_PENDING_RECHARGES") || "{}");
+    const entry = pending[oid];
+    if (entry) { phone = entry.phone || ""; name = entry.name || "Customer"; }
+  } catch(_) {}
+  if (!phone) {
+    return { error: "Could not identify customer for recharge " + oid };
+  }
+
+  // Credit exactly the gateway-confirmed amount. Verified=true (gateway is trusted).
+  _appendWalletTransaction(phone, name, "Recharge (HDFC Gateway)", chargedAmount, true, oid);
+  console.log("hdfc_finalizeWalletRecharge: credited ₹" + chargedAmount + " to " + phone + " (order " + oid + ")");
+
+  return { success: true, amount_credited: chargedAmount, phone: phone };
 }
 
 /**
@@ -6265,9 +6437,18 @@ function hdfc_processWebhookLog() {
       var   newStatus = "PROCESSED";
 
       if (eventName === "ORDER_SUCCEEDED" || order.status === "CHARGED") {
-        const markResult = hdfc_markOrderPaid(order);
-        result = JSON.stringify(markResult);
-        if (markResult.error) newStatus = "FAILED";
+        // Wallet-recharge orders use SK + YYMMDD + 'W' + 9 chars (vs 'G' for orders).
+        // Route them to the recharge finalizer instead of hdfc_markOrderPaid.
+        const oid = String(order.order_id || "").trim();
+        if (oid && /^SK\d{6}W/.test(oid)) {
+          const rechResult = hdfc_finalizeWalletRecharge(oid);
+          result = JSON.stringify(rechResult);
+          if (rechResult.error) newStatus = "FAILED";
+        } else {
+          const markResult = hdfc_markOrderPaid(order);
+          result = JSON.stringify(markResult);
+          if (markResult.error) newStatus = "FAILED";
+        }
 
       } else if (eventName === "REFUND_INITIATED" || eventName === "REFUND_SUCCEEDED") {
         // Placeholder — refund logic goes here when needed
