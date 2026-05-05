@@ -3769,47 +3769,35 @@
             <div style="flex-shrink:0;background:#6c3cf7;color:#fff;border-radius:8px;padding:4px 10px;font-size:0.75rem;font-weight:800;">Auto</div>
           </div>
 
-          <!-- Step 2: UPI -->
+          <!-- Step 2: HDFC Gateway (replaces manual UPI) -->
           <div style="padding:14px;background:#f8faff;border-radius:14px;border:1px solid #dbeafe;margin-bottom:14px;">
             <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
               <div style="flex-shrink:0;width:30px;height:30px;background:linear-gradient(135deg,#2563eb,#3b82f6);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:0.75rem;font-weight:800;color:#fff;">2</div>
               <div>
-                <div style="font-size:0.82rem;font-weight:700;color:#1e3a8a;">Pay via UPI</div>
-                <div style="font-size:0.75rem;color:#3b82f6;">Scan QR · tap button · or use UPI ID</div>
+                <div style="font-size:0.82rem;font-weight:700;color:#1e3a8a;">Pay via HDFC Gateway</div>
+                <div style="font-size:0.75rem;color:#3b82f6;">UPI · Cards · Net Banking · Wallets</div>
               </div>
               <div style="margin-left:auto;font-size:1.5rem;font-weight:900;color:#15803d;letter-spacing:-0.5px;">₹<span id="splitUpiAmtDisplay">0</span></div>
             </div>
 
-            <p class="text-sm" style="font-size:0.75rem;color:#64748b;text-align:center;margin-bottom:6px;">Scan QR or tap button to pay ₹<span id="splitUpiQrAmt">0</span></p>
-            <div id="splitQrcode" style="margin:0 auto 12px;border:4px solid #fff;box-shadow:0 4px 14px rgba(37,99,235,0.13);width:fit-content;border-radius:12px;"></div>
-
-            <div style="text-align:center;margin-bottom:12px;">
-              <div class="upi-id" onclick="copyUPI()" title="Click to copy UPI ID"
-                style="cursor:pointer;font-weight:700;color:#1e3a8a;font-size:0.88rem;letter-spacing:0.3px;display:inline-block;background:#dbeafe;padding:6px 16px;border-radius:20px;">
-                svaadhkitchen.36727659@hdfcbank
-              </div>
-              <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;">tap to copy</div>
+            <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:0.78rem;color:#0c4a6e;line-height:1.5;">
+              🔒 You'll be redirected to HDFC SmartGateway to complete this payment securely. Your wallet portion (₹<span id="splitWalletGatewayHint">0</span>) is deducted automatically on success.
             </div>
 
-            <a id="splitUpiDeepLink" href="#" class="btn btn-primary"
-              style="text-decoration:none;font-size:0.95rem;font-weight:700;padding:13px;height:auto;letter-spacing:0.2px;background:linear-gradient(135deg,#2563eb,#3b82f6);border-radius:12px;">
-              👆 Pay ₹<span id="splitUpiDeepLinkAmt">0</span> via UPI App
-            </a>
+            <button id="splitHdfcPayBtn" type="button" onclick="hdfc_initiatePayment()" class="btn btn-primary"
+              style="font-size:0.95rem;font-weight:700;padding:13px;height:auto;letter-spacing:0.2px;background:linear-gradient(135deg,#2563eb,#3b82f6);border-radius:12px;">
+              🔒 Pay ₹<span id="splitUpiDeepLinkAmt">0</span> via HDFC Gateway
+            </button>
           </div>
 
           <!-- Confirm checkbox -->
           <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:12px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;">
             <input type="checkbox" id="splitConfirmCheck" style="margin-top:2px;width:auto;accent-color:#16a34a;flex-shrink:0;"
               onchange="checkPaymentConfirmation()">
-            <span style="font-size:0.81rem;color:#14532d;line-height:1.5;font-weight:600;">I confirm ₹<span id="splitWalletConfirmAmt">0</span> Wallet used + paid ₹<span id="splitUpiConfirmAmt">0</span> via UPI</span>
+            <span style="font-size:0.81rem;color:#14532d;line-height:1.5;font-weight:600;">I confirm ₹<span id="splitWalletConfirmAmt">0</span> Wallet used + ₹<span id="splitUpiConfirmAmt">0</span> via HDFC Gateway</span>
           </label>
 
-          <p class="mr-note" style="margin-top:8px;text-align:center;">वॉलेटमधून ₹<span id="splitWalletMr">0</span> वजा होईल, बाकी ₹<span id="splitUpiMr">0</span> UPI द्वारे भरा</p>
-
-          <div style="text-align:center;margin-top:10px;">
-            <a href="javascript:togglePaymentMode('UPI')"
-              style="font-size:0.73rem;color:#94a3b8;text-decoration:underline;">Pay full ₹<span id="splitFullUpiLink">0</span> via UPI instead</a>
-          </div>
+          <p class="mr-note" style="margin-top:8px;text-align:center;">वॉलेटमधून ₹<span id="splitWalletMr">0</span> वजा होईल, बाकी ₹<span id="splitUpiMr">0</span> HDFC गेटवे द्वारे भरा</p>
         </div>
 
       </div>
@@ -4164,8 +4152,9 @@
     <div class="bill-modal-sheet" style="max-width:400px;">
       <div class="bm-handle"><span></span></div>
       <h2 class="bm-title" style="margin-bottom:6px;">Add Funds to Wallet</h2>
-      <p style="font-size:0.8rem;color:#777;text-align:center;margin-bottom:16px;">Admin will verify your payment and
-        credit it to your account within 1-2 hours.</p>
+      <p style="font-size:0.8rem;color:#777;text-align:center;margin-bottom:16px;">
+        Pay securely via HDFC Gateway. Your wallet will be credited automatically once payment is confirmed.
+      </p>
 
       <div style="display:flex;gap:8px;margin-bottom:16px;">
         <button class="wm-tab" style="flex:1" onclick="setWalletRecharge(100)">₹100</button>
@@ -4174,26 +4163,18 @@
       </div>
 
       <div style="margin-bottom:16px;">
-        <input type="number" id="walletRechargeAmt" class="custom-input" placeholder="Or enter custom amount (Min. 100)"
-          oninput="updateWalletQr()" style="width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;">
+        <input type="number" id="walletRechargeAmt" class="custom-input"
+          placeholder="Or enter custom amount (₹100 – ₹50,000)" min="100" max="50000"
+          style="width:100%;padding:10px;border:1px solid #ccc;border-radius:8px;">
       </div>
 
-      <div id="walletQrWrap" class="bm-qr-wrap" style="display:none;border-color:#c8e6c9;background:#e8f5e9;">
-        <div style="font-size:0.8rem;text-align:center;margin-bottom:8px;color:#2e7d32;font-weight:600;">Scan QR or Tap
-        </div>
-        <img id="walletQrImg" class="bm-qr" src="" alt="QR">
-        <div style="margin: 12px 0 15px;">
-          <div class="upi-id" onclick="copyUPI()" title="Click to copy UPI ID" style="cursor:pointer; font-weight:800; color:#1a3c8f; font-size: 0.95rem; letter-spacing: 0.5px; text-align: center;">
-            UPI ID: svaadhkitchen.36727659@hdfcbank
-          </div>
-          <div style="font-size:0.75rem; color:#7f8c8d; margin-top:2px; text-align: center;">(tap to copy)</div>
-        </div>
-        <a id="walletUpiLink" href="#" class="btn btn-primary"
-          style="margin-top:12px;background:#2e7d32;border-color:#1b5e20;">👆 Open GPay / PhonePe</a>
+      <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;padding:10px 12px;margin-bottom:14px;font-size:0.78rem;color:#0c4a6e;line-height:1.5;">
+        🔒 Payment secured by HDFC SmartGateway — supports UPI, Cards, Net Banking & Wallets.
       </div>
 
-      <button class="btn btn-primary" id="btnSubmitWallet" style="margin-top:16px;" onclick="submitWalletRecharge()">✅ I
-        have completed the payment</button>
+      <button class="btn btn-primary" id="btnSubmitWallet" style="margin-top:8px;" onclick="payWalletRechargeViaHDFC()">
+        🔒 Pay &amp; Recharge Wallet
+      </button>
       <button class="bm-later" onclick="closeWalletRecharge()">Cancel</button>
     </div>
   </div><!-- Replaced by shared modals-svaadh.js sConfirm and sAlert logic -->
@@ -4239,7 +4220,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.05.9-hdfc";
+    const APP_VERSION = "v26.05.05.10-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -6305,7 +6286,7 @@
           $("splitUpiConfirmAmt").textContent = upiDue;
           $("splitUpiMr").textContent = upiDue;
           $("splitWalletMr").textContent = wb;
-          $("splitFullUpiLink").textContent = grandTotal;
+          // splitFullUpiLink removed — Split now always routes via HDFC Gateway
           setupSplitUPI(upiDue);
         } else {
           S.paymentChoice = "UPI";
@@ -6369,7 +6350,6 @@
 
     function openWalletRecharge() {
       $('walletRechargeAmt').value = '';
-      $('walletQrWrap').style.display = 'none';
       $('walletRechargeModal').style.display = 'flex';
     }
     function closeWalletRecharge() {
@@ -6377,54 +6357,120 @@
     }
     function setWalletRecharge(amt) {
       $('walletRechargeAmt').value = amt;
-      updateWalletQr();
     }
-    function updateWalletQr() {
+
+    /**
+     * Pay wallet recharge via HDFC SmartGateway.
+     * Server-side amount bounds (₹100–₹50,000) enforced in DevCode.gs.
+     * Wallet credit is gated on HDFC Status API actual charged amount —
+     * tampering the request body cannot inflate the credit.
+     */
+    async function payWalletRechargeViaHDFC() {
       const amt = parseInt($('walletRechargeAmt').value, 10);
-      if (isNaN(amt) || amt < 100) {
-        $('walletQrWrap').style.display = 'none';
+      if (isNaN(amt) || amt < 100)   { toast("Minimum recharge amount is ₹100."); return; }
+      if (amt > 50000)               { toast("Maximum recharge per transaction is ₹50,000."); return; }
+      if (!S.gatewayEnabled) {
+        await sAlert("Payment gateway is not available right now. Please try again later.", "Gateway Unavailable", "⚠️");
         return;
       }
-      const name = (S.profile?.name || 'Customer').trim();
-      const phone = (S.phone || '').trim();
-      const note = `SvaadhW ${phone.slice(-4)}`;
-      // Removed tr, mode=02 and pn to treat as P2P and avoid GPay validation rejections
-      const upiData = `upi://pay?pa=${UPI_VPA}&am=${amt.toFixed(2)}&cu=INR&tn=${encodeURIComponent(note)}`;
-
-      const qrImg = $('walletQrImg');
-      qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(upiData)}`;
-      qrImg.onclick = () => { $('walletUpiLink').click(); };
-      qrImg.style.cursor = 'pointer';
-      qrImg.title = 'Tap to pay via any UPI app';
-      
-      $('walletUpiLink').href = upiData;
-      $('walletQrWrap').style.display = 'block';
-    }
-
-    async function submitWalletRecharge() {
-      const amt = parseInt($('walletRechargeAmt').value, 10);
-      if (isNaN(amt) || amt < 100) { toast("Minimum recharge amount is ₹100."); return; }
 
       const btn = $('btnSubmitWallet');
-      sBtnLoading(btn, true, "Submitting");
+      sBtnLoading(btn, true, "Connecting to gateway");
 
       try {
         const res = await apiPost({
-            _action: "submitWalletRecharge",
-            phone: S.phone,
-            name: S.profile?.name || "Customer",
-            amount: amt
-          });
+          _action: "hdfc_createWalletRechargeSession",
+          phone:   S.phone,
+          name:    S.profile?.name || "Customer",
+          amount:  amt
+        });
         const data = await res.json();
         sBtnLoading(btn, false);
-        if (!data.success) throw new Error(data.error || "Failed");
+        if (!data.success || !data.payment_url) throw new Error(data.error || "Could not start payment.");
 
-        await sAlert(t('toast_recharge_submitted'), "Recharge Submitted", "✅");
-        closeWalletRecharge();
-        syncWalletValue(); // Refresh UI balance after recharge request
+        // Persist the recharge order_id so the return-flow can finalize it.
+        try {
+          localStorage.setItem("svaadh_hdfc_pending_recharge", data.order_id);
+          localStorage.setItem("svaadh_hdfc_pending_recharge_ts", String(Date.now()));
+        } catch(_) {}
+
+        // Redirect customer to HDFC HyperCheckout
+        window.location.href = data.payment_url;
       } catch (err) {
         sBtnLoading(btn, false);
-        await sAlert("Error: " + err.message, "Submission Failed", "❌");
+        await sAlert("Could not start gateway payment.\n\n" + err.message, "Gateway Error", "❌");
+      }
+    }
+
+    /** Legacy alias — kept so any deep-linked button still works.
+     *  Routes to the HDFC gateway flow now. */
+    async function submitWalletRecharge() { return payWalletRechargeViaHDFC(); }
+
+    /**
+     * After HDFC redirect, if a pending recharge order_id exists in localStorage,
+     * finalize it via the backend (which calls HDFC Status API and credits the
+     * wallet with the actual charged amount). Idempotent — backend dedupes by Ref_Code.
+     */
+    async function hdfc_handleRechargeReturn() {
+      let pendingId, ts;
+      try {
+        pendingId = localStorage.getItem("svaadh_hdfc_pending_recharge");
+        ts = parseInt(localStorage.getItem("svaadh_hdfc_pending_recharge_ts") || "0", 10);
+      } catch(_) {}
+      if (!pendingId) return;
+
+      // Stale guard: discard if older than 30 minutes
+      if (ts && (Date.now() - ts) > 30*60*1000) {
+        try {
+          localStorage.removeItem("svaadh_hdfc_pending_recharge");
+          localStorage.removeItem("svaadh_hdfc_pending_recharge_ts");
+        } catch(_) {}
+        return;
+      }
+
+      // Only finalize if URL params suggest a successful return
+      const sp = new URLSearchParams(window.location.search);
+      const status = sp.get("hdfc_status") || sp.get("status");
+      if (!status) return; // not a return — let it sit, user may still complete payment
+
+      try {
+        const res = await fetch(APPS_SCRIPT_URL, {
+          method: "POST",
+          body: JSON.stringify({ _action: "hdfc_finalizeWalletRecharge", order_id: pendingId })
+        });
+        const data = await res.json();
+        try {
+          localStorage.removeItem("svaadh_hdfc_pending_recharge");
+          localStorage.removeItem("svaadh_hdfc_pending_recharge_ts");
+        } catch(_) {}
+
+        // Clean up URL params (so hdfc_handleReturnParams doesn't also trigger)
+        try { window.history.replaceState({}, "", window.location.pathname); } catch(_) {}
+        // Remove the early overlay
+        const ov = document.getElementById("hdfc-early-overlay");
+        if (ov) ov.remove();
+
+        if (data.success) {
+          if (data.already_credited) {
+            // Silent — already done
+          } else {
+            await sAlert(
+              "Your wallet has been credited with ₹" + (data.amount_credited || 0) + ".",
+              "Wallet Recharged ✅", "💰"
+            );
+            // Refresh balance display
+            try { syncWalletValue && syncWalletValue(); } catch(_) {}
+            try { refreshWalletBalance && refreshWalletBalance(); } catch(_) {}
+          }
+        } else {
+          await sAlert(
+            "Recharge could not be confirmed.\n\n" + (data.error || "") +
+            "\n\nIf money was deducted, WhatsApp us at +91 93222 46765 with order ID: " + pendingId,
+            "Recharge Pending", "⚠️"
+          );
+        }
+      } catch (e) {
+        console.warn("hdfc_handleRechargeReturn error:", e.message);
       }
     }
 
@@ -6488,50 +6534,16 @@
     }
 
 
-    // ── SPLIT UPI SETUP ──────────────────────────────────────────
+    // ── SPLIT HDFC GATEWAY SETUP ─────────────────────────────────
+    // No more QR / UPI deeplink — split payments now route the non-wallet
+    // portion through the same HDFC gateway flow as a regular Gateway order.
+    // Populates the visible "₹X via HDFC Gateway" labels.
     function setupSplitUPI(amount) {
-      const hdfcVpa     = "svaadhkitchen.36727659@hdfcbank";
-      const merchantVpa = "svaadhkitchen.36727659@hdfcbank";
-      const payeeName   = "Svaadh Kitchen";
-      const mccCode     = "5812";
-      const note        = `Svaadh ${S.phone.slice(-4)}`;
-      const txRef       = `SK${Date.now()}${Math.floor(Math.random()*1000)}`;
-      const qrUpiStr    = `upi://pay?pa=${hdfcVpa}&am=${Number(amount).toFixed(2)}&tn=${encodeURIComponent(note)}&cu=INR`;
-      const deepUpiStr  = `upi://pay?pa=${merchantVpa}&pn=${encodeURIComponent(payeeName)}&mc=${mccCode}&tr=${txRef}&am=${Number(amount).toFixed(2)}&tn=${encodeURIComponent(note)}&cu=INR&mode=02`;
-
-      ["splitUpiQrAmt","splitUpiAmtDisplay","splitUpiDeepLinkAmt"].forEach(id => {
+      ["splitUpiAmtDisplay","splitUpiDeepLinkAmt"].forEach(id => {
         if ($(id)) $(id).textContent = amount;
       });
-
-      const qrEl = $("splitQrcode");
-      if (qrEl) {
-        qrEl.innerHTML = "";
-        new QRCode(qrEl, { text: qrUpiStr, width: 176, height: 176, correctLevel: QRCode.CorrectLevel.M });
-        qrEl.style.cursor = "default";
-        qrEl.onclick = null;
-      }
-
-      const btn = $("splitUpiDeepLink");
-      if (btn) {
-        if (isIOS()) {
-          btn.removeAttribute("href");
-          btn.textContent = t('upi_copy_label');
-          btn.onclick = (e) => {
-            e.preventDefault();
-            navigator.clipboard?.writeText(hdfcVpa)
-              .then(() => toast(t('upi_copied_toast', { amt: amount }), 3500))
-              .catch(() => {
-                const el = document.createElement("input"); el.value = hdfcVpa;
-                document.body.appendChild(el); el.select(); document.execCommand("copy"); document.body.removeChild(el);
-                toast(t('upi_copied_toast', { amt: amount }), 3500);
-              });
-          };
-        } else {
-          btn.href = deepUpiStr;
-          btn.onclick = null;
-          btn.innerHTML = `👆 Pay ₹${amount} via UPI App`;
-        }
-      }
+      const wb = Number(S.walletCredit || 0);
+      if ($("splitWalletGatewayHint")) $("splitWalletGatewayHint").textContent = wb;
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -6554,7 +6566,7 @@
       if (confirmEl && !confirmEl.checked) {
         if (isWalletOrder) toast("Please confirm wallet deduction");
         else if (isOnAccountOrder) toast("Please confirm 'On Account' placement");
-        else if (isSplitOrder) toast("Please confirm wallet + UPI split payment");
+        else if (isSplitOrder) toast("Please confirm wallet + HDFC Gateway split payment");
         else if (isFreeOrder) toast("Please confirm to place this free order");
         else toast(t('toast_confirm_payment'));
         return;
@@ -7723,6 +7735,11 @@
         const el = document.getElementById("hdfc-early-overlay");
         if (el) el.remove();
       };
+
+      // 0. If we have a pending wallet recharge in localStorage and we just
+      //    came back with HDFC return params, finalize the wallet credit
+      //    BEFORE hdfc_handleReturnParams (which is for ORDER returns).
+      await hdfc_handleRechargeReturn();
 
       // 1. Check for return URL params first (customer coming back from HDFC)
       await hdfc_handleReturnParams();
