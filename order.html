@@ -8,6 +8,73 @@
   <meta name="author" content="Svaadh Kitchen">
 
   <!-- ═══════════════════════════════════════════════════════════════════
+       POPUP-MODE INTERCEPT
+       If this page is loading inside the HDFC payment popup we opened
+       (window.name was set to "hdfc_payment" or "hdfc_recharge" — that
+       name persists across cross-origin navigations), then we are NOT
+       the customer's primary tab. We must NOT render the order page.
+       Instead: relay the return params to the opener via localStorage
+       (storage event fires in other tabs of the same origin), then
+       close the popup.
+       ═══════════════════════════════════════════════════════════════════ -->
+  <script>
+    (function() {
+      try {
+        var n = String(window.name || "");
+        if (n === "hdfc_payment" || n === "hdfc_recharge") {
+          var sp = new URLSearchParams(window.location.search || "");
+          var orderId = sp.get("hdfc_order_id") || sp.get("order_id") || "";
+          var status  = sp.get("hdfc_status")   || sp.get("status")   || "";
+          // Relay to opener tab via storage event (cross-tab, same-origin)
+          try {
+            localStorage.setItem("svaadh_hdfc_popup_result", JSON.stringify({
+              type:    n,            // hdfc_payment | hdfc_recharge
+              orderId: orderId,
+              status:  status,
+              ts:      Date.now()
+            }));
+          } catch(_) {}
+          // Try to self-close. window.close() works for script-opened windows.
+          var tried = false;
+          var doClose = function(){
+            if (tried) return; tried = true;
+            try { window.close(); } catch(_) {}
+            try { window.top.close(); } catch(_) {}
+          };
+          // Replace body with a friendly fallback message in case close fails
+          document.addEventListener("DOMContentLoaded", function() {
+            try {
+              document.title = "Payment Received";
+              document.body.innerHTML =
+                '<div style="font-family:system-ui,-apple-system,Arial,sans-serif;' +
+                'min-height:100vh;display:flex;flex-direction:column;align-items:center;' +
+                'justify-content:center;padding:40px 20px;text-align:center;background:#fef9f6;">' +
+                '<div style="font-size:3rem;color:#16a34a;margin-bottom:16px;">✓</div>' +
+                '<div style="font-size:1.4rem;font-weight:800;color:#222;margin-bottom:8px;">' +
+                'Payment Received</div>' +
+                '<div style="font-size:1rem;color:#666;margin-bottom:24px;">' +
+                'You can close this tab and return to your order.</div>' +
+                '<button onclick="window.close()" style="padding:12px 28px;background:#c0392b;color:#fff;' +
+                'border:none;border-radius:10px;font-size:1rem;font-weight:700;cursor:pointer;">' +
+                'Close</button></div>';
+            } catch(_) {}
+          });
+          // Aggressive auto-close attempts
+          doClose();
+          setTimeout(doClose, 100);
+          setTimeout(doClose, 800);
+          setTimeout(doClose, 1500);
+          // Stop the rest of the page from initialising
+          window.stop && window.stop();
+          throw new Error("HDFC popup intercepted — closing");
+        }
+      } catch(e) {
+        if (String(e.message || "").indexOf("HDFC popup") === 0) throw e;
+      }
+    })();
+  </script>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
        TOP-OF-PAGE REDIRECT GUARD + EARLY LOADING OVERLAY
        1. If this page is loaded on the Apps Script /exec URL, force-navigate
           to the canonical GitHub Pages URL with all query params intact.
@@ -4220,7 +4287,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.06.1-hdfc";
+    const APP_VERSION = "v26.05.06.2-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -7954,6 +8021,31 @@
      * second; once the popup is gone, runs the verification flow on this tab
      * (which already has the cart state in memory — no reload needed).
      */
+    // ── Cross-tab popup-result listener ────────────────────────────────
+    // Only one listener at a time; previous handler is replaced when a new
+    // payment is initiated. Stored on window so multiple init paths share it.
+    function _hdfcInstallPopupResultListener(orderId, expectedType, onResult) {
+      // Remove any previous listener first
+      if (window._hdfcPopupResultHandler) {
+        window.removeEventListener("storage", window._hdfcPopupResultHandler);
+        window._hdfcPopupResultHandler = null;
+      }
+      const handler = (e) => {
+        if (e.key !== "svaadh_hdfc_popup_result" || !e.newValue) return;
+        let data;
+        try { data = JSON.parse(e.newValue); } catch(_) { return; }
+        if (!data || data.type !== expectedType) return;
+        if (data.orderId && data.orderId !== orderId) return; // stale entry
+        // One-shot
+        try { localStorage.removeItem("svaadh_hdfc_popup_result"); } catch(_) {}
+        window.removeEventListener("storage", handler);
+        window._hdfcPopupResultHandler = null;
+        onResult(data);
+      };
+      window.addEventListener("storage", handler);
+      window._hdfcPopupResultHandler = handler;
+    }
+
     function _hdfcShowWaitingOverlay(orderId, popup) {
       // Build overlay
       const ov = document.createElement("div");
@@ -7990,16 +8082,15 @@
         };
       }
 
-      // Poll popup state every second
-      const timer = setInterval(async () => {
-        if (cancelled) { clearInterval(timer); return; }
-
-        let closed = true;
-        try { closed = popup.closed; } catch(_) { closed = true; }
-        if (!closed) return;
-
+      // Shared verify routine — called from either:
+      //   (a) storage event from popup (preferred — fires immediately)
+      //   (b) popup.closed poll (fallback if storage event missed)
+      let verifyStarted = false;
+      const runVerify = async (statusFromPopup) => {
+        if (verifyStarted) return;
+        verifyStarted = true;
         clearInterval(timer);
-        // Popup is gone — payment is either completed or aborted. Verify with backend.
+        // Update overlay to "Verifying"
         ov.querySelector("div > div").textContent = "Verifying Payment";
         ov.querySelector("div > div + div").innerHTML = "Confirming with HDFC…<br>Please wait.";
         try {
@@ -8008,7 +8099,7 @@
             body: JSON.stringify({
               _action:   "hdfc_verifyReturn",
               order_id:  orderId,
-              status:    "CHARGED",
+              status:    statusFromPopup || "CHARGED",
               signature: ""
             })
           });
@@ -8027,7 +8118,6 @@
             return;
           }
           if (data.paid) {
-            // Restore state from backend (in case tab was idle / refreshed)
             let pendingData = null;
             try {
               const r = await fetch(APPS_SCRIPT_URL, {
@@ -8045,7 +8135,6 @@
               S.isFirstTime   = pendingData.isFirstTime   || false;
               S.grandTotal    = pendingData.amount        || S.grandTotal || 0;
             }
-            // Pre-load menu cache so success summary shows correct prices
             await Promise.all((S.selectedDates || []).map(async (d) => {
               if (S.menuCache[d]) return;
               try {
@@ -8072,6 +8161,22 @@
           ov.remove();
           await sAlert("Verification error: " + e.message, "Error", "❌");
         }
+      };
+
+      // Listen for popup → opener message via storage event (instant trigger)
+      _hdfcInstallPopupResultListener(orderId, "hdfc_payment", async (data) => {
+        // Force-close the popup (cleanup) — opener owns it
+        try { popup.close(); } catch(_) {}
+        await runVerify(data.status || "CHARGED");
+      });
+
+      // Fallback: poll popup state every second in case storage event is missed
+      const timer = setInterval(async () => {
+        if (cancelled || verifyStarted) { clearInterval(timer); return; }
+        let closed = true;
+        try { closed = popup.closed; } catch(_) { closed = true; }
+        if (!closed) return;
+        await runVerify("CHARGED");
       }, 1000);
     }
 
@@ -8102,10 +8207,10 @@
         ov.remove();
       };
 
-      const timer = setInterval(async () => {
-        if (cancelled) { clearInterval(timer); return; }
-        let closed = true; try { closed = popup.closed; } catch(_) { closed = true; }
-        if (!closed) return;
+      let verifyStarted = false;
+      const runFinalize = async () => {
+        if (verifyStarted) return;
+        verifyStarted = true;
         clearInterval(timer);
 
         document.getElementById("rwTitle").textContent = "Crediting Wallet";
@@ -8136,6 +8241,20 @@
           ov.remove();
           await sAlert("Verification error: " + e.message, "Error", "❌");
         }
+      };
+
+      // Storage-event listener for instant popup → opener relay
+      _hdfcInstallPopupResultListener(orderId, "hdfc_recharge", async () => {
+        try { popup.close(); } catch(_) {}
+        await runFinalize();
+      });
+
+      // Fallback poll
+      const timer = setInterval(async () => {
+        if (cancelled || verifyStarted) { clearInterval(timer); return; }
+        let closed = true; try { closed = popup.closed; } catch(_) { closed = true; }
+        if (!closed) return;
+        await runFinalize();
       }, 1000);
     }
 
