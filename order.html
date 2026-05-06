@@ -4287,7 +4287,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.06.4-hdfc";
+    const APP_VERSION = "v26.05.06.5-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -6558,6 +6558,36 @@
       // Only finalize if URL params suggest a successful return
       if (!status) return;
 
+      // ── Detect popup mode and notify opener ───────────────────────────
+      // If we're running in the popup (opener exists OR window.name was set
+      // by us), tell the original tab via localStorage event and self-close.
+      // The original tab will run its own finalize path which is the canonical
+      // place to show success — running it here AND there causes confusion.
+      let _isPopup = false;
+      try { _isPopup = !!window.opener && !window.opener.closed; } catch(_) {}
+      try { if (window.name === "hdfc_recharge") _isPopup = true; } catch(_) {}
+      if (_isPopup) {
+        try {
+          localStorage.setItem("svaadh_hdfc_popup_result", JSON.stringify({
+            type: "hdfc_recharge", orderId: pendingId, status: status, ts: Date.now()
+          }));
+        } catch(_) {}
+        try { window.history.replaceState({}, "", window.location.pathname); } catch(_) {}
+        // Show a brief "payment received" UI then close
+        try {
+          document.body.innerHTML =
+            '<div style="font-family:system-ui,-apple-system,Arial,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;text-align:center;background:#fef9f6;">' +
+            '<div style="font-size:3rem;color:#16a34a;margin-bottom:16px;">✓</div>' +
+            '<div style="font-size:1.4rem;font-weight:800;color:#222;margin-bottom:8px;">Payment Received</div>' +
+            '<div style="font-size:1rem;color:#666;">Closing this tab automatically…</div>' +
+            '</div>';
+        } catch(_) {}
+        var _tryC = 0;
+        var _doClose = function(){ _tryC++; try{ window.close(); }catch(_){}; if(_tryC<6) setTimeout(_doClose, 300); };
+        _doClose();
+        return; // do NOT run the rest — opener will handle it
+      }
+
       // Remove early overlay BEFORE any sAlert below
       const _early = document.getElementById("hdfc-early-overlay");
       if (_early) _early.remove();
@@ -8360,6 +8390,34 @@
       if (/^SK\d{6}W/.test(orderId)) {
         try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch(_) {}
         return;
+      }
+
+      // ── Detect popup mode and notify opener ────────────────────────────
+      // If we're running inside the payment popup (window.opener exists or
+      // window.name marker is set), don't run the verify flow here — relay
+      // the result to the original tab via storage event and self-close.
+      let _isPopup = false;
+      try { _isPopup = !!window.opener && !window.opener.closed; } catch(_) {}
+      try { if (window.name === "hdfc_payment") _isPopup = true; } catch(_) {}
+      if (_isPopup) {
+        try {
+          localStorage.setItem("svaadh_hdfc_popup_result", JSON.stringify({
+            type: "hdfc_payment", orderId: orderId, status: status, ts: Date.now()
+          }));
+        } catch(_) {}
+        try { window.history.replaceState({}, "", window.location.pathname); } catch(_) {}
+        try {
+          document.body.innerHTML =
+            '<div style="font-family:system-ui,-apple-system,Arial,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;text-align:center;background:#fef9f6;">' +
+            '<div style="font-size:3rem;color:#16a34a;margin-bottom:16px;">✓</div>' +
+            '<div style="font-size:1.4rem;font-weight:800;color:#222;margin-bottom:8px;">Payment Received</div>' +
+            '<div style="font-size:1rem;color:#666;">Closing this tab automatically…</div>' +
+            '</div>';
+        } catch(_) {}
+        var _tryC2 = 0;
+        var _doClose2 = function(){ _tryC2++; try{ window.close(); }catch(_){}; if(_tryC2<6) setTimeout(_doClose2, 300); };
+        _doClose2();
+        return; // do NOT run verify — opener will handle it
       }
 
       // Remove the early overlay BEFORE we may show sAlert below — otherwise
