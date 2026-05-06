@@ -292,7 +292,7 @@ function _hdfcReturnRedirectHtml(redirectUrl) {
   // first user gesture (click/tap/keypress) to fire the navigation reliably.
   return '<!DOCTYPE html><html><head><title>Returning to Svaadh Kitchen…</title>' +
          '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-         '<meta http-equiv="refresh" content="0;url=' + safeUrlAttr + '">' +
+         '<meta http-equiv="refresh" content="3;url=' + safeUrlAttr + '">' +
          '<style>' +
          '  *{box-sizing:border-box;margin:0;padding:0;}' +
          '  html,body{height:100%;font-family:system-ui,-apple-system,Segoe UI,Arial,sans-serif;}' +
@@ -307,32 +307,40 @@ function _hdfcReturnRedirectHtml(redirectUrl) {
          '  .t2{font-size:0.95rem;color:#555;margin-bottom:32px;text-align:center;padding:0 20px;}' +
          '  .cta{display:inline-block;padding:18px 44px;background:#c0392b;color:#fff;' +
          '    border-radius:14px;font-weight:700;font-size:1.1rem;letter-spacing:0.3px;' +
-         '    box-shadow:0 8px 24px rgba(192,57,43,0.35);animation:pulse 1.6s ease-in-out infinite;}' +
-         '  @keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.04);}}' +
+         '    box-shadow:0 8px 24px rgba(192,57,43,0.35);}' +
          '  .hint{margin-top:16px;font-size:0.78rem;color:#888;}' +
          '</style></head>' +
          '<body>' +
-         // The whole screen is a clickable link with target="_top" — first click
-         // anywhere navigates the top frame (which IS allowed under user activation).
          '<a class="full" href="' + safeUrlAttr + '" target="_top" id="goLink">' +
          '  <div class="ring"></div>' +
          '  <div class="t1">Payment Received ✓</div>' +
-         '  <div class="t2">Tap anywhere to view your order confirmation</div>' +
-         '  <div class="cta">Continue to Order →</div>' +
-         '  <div class="hint">If nothing happens automatically, please tap the screen.</div>' +
+         '  <div class="t2" id="msg2">Returning to Svaadh Kitchen…</div>' +
+         '  <div class="cta" id="cta">Continue →</div>' +
+         '  <div class="hint" id="hint"></div>' +
          '</a>' +
          '<script>' +
-         // Try auto-navigation as soon as the page loads (in case sandbox permits it).
          '  (function(){' +
          '    var URL=' + safeUrlJs + ';' +
+         // ── If running inside a popup window (opened via window.open), the
+         //    parent tab is already handling verification via popup.closed
+         //    polling. Just self-close. window.close() works without user
+         //    activation when the window was opened by script.
+         '    var inPopup=false;' +
+         '    try{ inPopup=!!(window.top && window.top.opener && !window.top.opener.closed); }catch(_){}' +
+         '    if(inPopup){' +
+         '      try{document.getElementById("msg2").textContent="Closing this tab automatically…";}catch(_){}' +
+         '      try{document.getElementById("cta").textContent="Close & continue";}catch(_){}' +
+         '      try{document.getElementById("goLink").href="javascript:void(0)";}catch(_){}' +
+         '      try{document.getElementById("goLink").onclick=function(){try{window.top.close();}catch(_){window.close();}return false;};}catch(_){}' +
+         '      setTimeout(function(){try{window.top.close();}catch(_){window.close();}},800);' +
+         '      setTimeout(function(){try{window.top.close();}catch(_){window.close();}},2000);' +
+         '      return;' +
+         '    }' +
+         // Same-tab fallback path: try auto-navigate, then rely on user click.
          '    function go(){try{window.top.location.replace(URL);}catch(e){try{window.top.location.href=URL;}catch(_){window.location.href=URL;}}}' +
-         // Attempt 1: synchronous (may work in some browsers)
          '    try{window.top.location.replace(URL);}catch(_){}' +
-         // Attempt 2: after a tick
          '    setTimeout(go,50);' +
-         // Attempt 3: after 500ms (in case top-frame is still settling)
          '    setTimeout(go,500);' +
-         // Attempt 4: hijack the FIRST user gesture of any kind to trigger navigation
          '    function onFirstGesture(){' +
          '      try{document.getElementById("goLink").click();}catch(_){}' +
          '      go();' +
