@@ -4287,7 +4287,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.06.3-hdfc";
+    const APP_VERSION = "v26.05.06.4-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -6441,6 +6441,34 @@
         return;
       }
 
+      // Open the popup IMMEDIATELY (within user-activation window — browsers
+      // block window.open after async work). We'll navigate it once we have
+      // the payment URL.
+      const popup = window.open("about:blank", "hdfc_recharge",
+        "width=520,height=720,menubar=no,toolbar=no,location=yes");
+      const _blocked = !popup || popup.closed || typeof popup.closed === "undefined";
+
+      if (popup && !_blocked) {
+        try {
+          popup.document.write(
+            '<!DOCTYPE html><html><head><title>Connecting to HDFC…</title>' +
+            '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+            '<style>html,body{margin:0;height:100%;font-family:system-ui,-apple-system,Arial,sans-serif;' +
+            'display:flex;align-items:center;justify-content:center;background:#fef9f6;}' +
+            '.box{text-align:center;padding:30px;}' +
+            '.spin{width:48px;height:48px;border:5px solid #f5cba7;border-top-color:#c0392b;' +
+            'border-radius:50%;animation:s 1s linear infinite;margin:0 auto 18px;}' +
+            '@keyframes s{to{transform:rotate(360deg);}}' +
+            '.t{font-weight:800;color:#c0392b;font-size:1.1rem;margin-bottom:6px;}' +
+            '.s{color:#666;font-size:0.88rem;}' +
+            '</style></head><body><div class="box"><div class="spin"></div>' +
+            '<div class="t">Connecting to HDFC…</div>' +
+            '<div class="s">Please wait, secure session is being created.</div>' +
+            '</div></body></html>'
+          );
+        } catch(_) {}
+      }
+
       const btn = $('btnSubmitWallet');
       sBtnLoading(btn, true, "Connecting to gateway");
 
@@ -6453,7 +6481,10 @@
         });
         const data = await res.json();
         sBtnLoading(btn, false);
-        if (!data.success || !data.payment_url) throw new Error(data.error || "Could not start payment.");
+        if (!data.success || !data.payment_url) {
+          try { popup && popup.close(); } catch(_) {}
+          throw new Error(data.error || "Could not start payment.");
+        }
 
         // Persist the recharge order_id so the return-flow can finalize it.
         try {
@@ -6461,15 +6492,21 @@
           localStorage.setItem("svaadh_hdfc_pending_recharge_ts", String(Date.now()));
         } catch(_) {}
 
-        // Open HDFC checkout in a new tab — original tab keeps its URL.
-        const popup = window.open(data.payment_url, "hdfc_recharge",
-          "width=520,height=720,menubar=no,toolbar=no,location=yes");
-        const _blocked = !popup || popup.closed || typeof popup.closed === "undefined";
         if (_blocked) {
-          // Popup blocked → fallback to same-tab redirect
+          // Popup was blocked → same-tab fallback
           window.location.href = data.payment_url;
           return;
         }
+
+        // Navigate the already-open popup to the actual payment URL.
+        try {
+          popup.location.href = data.payment_url;
+        } catch (e) {
+          try { popup.close(); } catch(_) {}
+          window.location.href = data.payment_url;
+          return;
+        }
+
         closeWalletRecharge();
         _hdfcShowWaitingOverlayForRecharge(data.order_id, popup);
       } catch (err) {
@@ -7891,6 +7928,15 @@
         return;
       }
 
+      // ── POPUP MUST OPEN INSIDE USER-ACTIVATION WINDOW ─────────────────
+      // Browsers block window.open() after async work loses user activation.
+      // Open the popup IMMEDIATELY here with about:blank, then navigate it
+      // to the actual payment URL once the session is ready below. This is
+      // the same trick wallet recharge uses.
+      const popup = window.open("about:blank", "hdfc_payment",
+        "width=520,height=720,menubar=no,toolbar=no,location=yes");
+      const _popupBlocked = !popup || popup.closed || typeof popup.closed === "undefined";
+
       // Disable + show loading text on whichever Pay button is currently visible
       // (regular Gateway flow uses #hdfcPayBtn; Split flow uses #splitHdfcPayBtn)
       const _payBtns = ["hdfcPayBtn", "splitHdfcPayBtn"]
@@ -7904,6 +7950,29 @@
       });
       // Backwards-compat alias used by existing error-handler code below
       const btn = $("hdfcPayBtn") || $("splitHdfcPayBtn");
+
+      // Show a friendly loading state inside the popup while we wait for the
+      // session URL from the backend.
+      if (popup && !_popupBlocked) {
+        try {
+          popup.document.write(
+            '<!DOCTYPE html><html><head><title>Connecting to HDFC…</title>' +
+            '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+            '<style>html,body{margin:0;height:100%;font-family:system-ui,-apple-system,Arial,sans-serif;' +
+            'display:flex;align-items:center;justify-content:center;background:#fef9f6;}' +
+            '.box{text-align:center;padding:30px;}' +
+            '.spin{width:48px;height:48px;border:5px solid #f5cba7;border-top-color:#c0392b;' +
+            'border-radius:50%;animation:s 1s linear infinite;margin:0 auto 18px;}' +
+            '@keyframes s{to{transform:rotate(360deg);}}' +
+            '.t{font-weight:800;color:#c0392b;font-size:1.1rem;margin-bottom:6px;}' +
+            '.s{color:#666;font-size:0.88rem;}' +
+            '</style></head><body><div class="box"><div class="spin"></div>' +
+            '<div class="t">Connecting to HDFC…</div>' +
+            '<div class="s">Please wait, secure session is being created.</div>' +
+            '</div></body></html>'
+          );
+        } catch(_) {}
+      }
 
       // Generate a unique gateway order ID for this session.
       // Rules (HDFC security audit): alphanumeric only, ≤21 chars, non-sequential.
@@ -7969,24 +8038,20 @@
         const data = await res.json();
 
         if (data.success && data.payment_url) {
-          // ── POPUP-BASED PAYMENT FLOW ────────────────────────────────────
-          // Open HDFC checkout in a new tab. Original tab keeps its URL and
-          // cart state. After payment, the popup hits our Apps Script /exec
-          // return URL, which serves a self-closing page (window.close).
-          // Original tab polls popup.closed and verifies payment when popup
-          // disappears. This avoids the iframe-sandbox URL-bar problem
-          // because the original tab never navigates.
-          //
-          // Popup blockers on mobile browsers often silently block window.open,
-          // so we detect the failure and fall back to same-tab redirect.
-          const popup = window.open(data.payment_url, "hdfc_payment",
-            "width=520,height=720,menubar=no,toolbar=no,location=yes");
-
-          const _popupBlocked = !popup || popup.closed || typeof popup.closed === "undefined";
           if (_popupBlocked) {
-            // Fallback: same-tab redirect (older flow). User will land on
-            // Apps Script URL → tap "Continue" → GitHub Pages → success.
+            // Popup was blocked by browser → fall back to same-tab redirect.
             console.warn("Popup blocked — falling back to same-tab redirect.");
+            window.location.href = data.payment_url;
+            return;
+          }
+          // Navigate the already-open popup to the actual payment URL.
+          // (popup was opened earlier in this function while user activation
+          // was still valid — see top of hdfc_initiatePayment.)
+          try {
+            popup.location.href = data.payment_url;
+          } catch (e) {
+            // Cross-origin write may fail in some browsers; fall back to navigating same-tab.
+            try { popup.close(); } catch(_) {}
             window.location.href = data.payment_url;
             return;
           }
@@ -8000,6 +8065,8 @@
             b.innerHTML = _origBtnHtml[b.id] || b.innerHTML;
           });
         } else {
+          // Session failed — close the loading popup so user isn't left with it
+          try { popup && popup.close(); } catch(_) {}
           throw new Error(data.error || "Could not create payment session.");
         }
       } catch (err) {
