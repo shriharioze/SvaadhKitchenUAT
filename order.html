@@ -4287,7 +4287,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.06.2-hdfc";
+    const APP_VERSION = "v26.05.06.3-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -8229,11 +8229,19 @@
           } catch(_) {}
 
           if (data.success) {
-            if (!data.already_credited) {
-              await sAlert("Your wallet has been credited with ₹" + (data.amount_credited || 0) + ".", "Wallet Recharged ✅", "💰");
+            // Update balance UI INSTANTLY (optimistic) before showing the toast,
+            // and also kick off a server refresh in parallel so the badge stays
+            // accurate even if our optimistic delta drifts.
+            const credited = Number(data.amount_credited || 0);
+            if (credited > 0) {
+              S.walletBalance = (Number(S.walletBalance) || 0) + credited;
+              try { updateWalletBalanceUI(S.walletBalance); } catch(_) {}
             }
-            try { syncWalletValue && syncWalletValue(); } catch(_) {}
             try { refreshWalletBalance && refreshWalletBalance(); } catch(_) {}
+            try { syncWalletValue && syncWalletValue(); } catch(_) {}
+            if (!data.already_credited) {
+              await sAlert("Your wallet has been credited with ₹" + credited + ".", "Wallet Recharged ✅", "💰");
+            }
           } else {
             await sAlert("Recharge could not be confirmed.\n\n" + (data.error || "") + "\n\nIf money was deducted, WhatsApp us at +91 93222 46765 with order ID: " + orderId, "Recharge Pending", "⚠️");
           }

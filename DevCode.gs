@@ -321,22 +321,24 @@ function _hdfcReturnRedirectHtml(redirectUrl) {
          '<script>' +
          '  (function(){' +
          '    var URL=' + safeUrlJs + ';' +
-         // ── If running inside a popup window (opened via window.open), the
-         //    parent tab is already handling verification via popup.closed
-         //    polling. Just self-close. window.close() works without user
-         //    activation when the window was opened by script.
-         '    var inPopup=false;' +
-         '    try{ inPopup=!!(window.top && window.top.opener && !window.top.opener.closed); }catch(_){}' +
-         '    if(inPopup){' +
-         '      try{document.getElementById("msg2").textContent="Closing this tab automatically…";}catch(_){}' +
-         '      try{document.getElementById("cta").textContent="Close & continue";}catch(_){}' +
-         '      try{document.getElementById("goLink").href="javascript:void(0)";}catch(_){}' +
-         '      try{document.getElementById("goLink").onclick=function(){try{window.top.close();}catch(_){window.close();}return false;};}catch(_){}' +
-         '      setTimeout(function(){try{window.top.close();}catch(_){window.close();}},800);' +
-         '      setTimeout(function(){try{window.top.close();}catch(_){window.close();}},2000);' +
-         '      return;' +
+         // window.close() is a no-op in tabs that were not opened by JS, so it\'s
+         // SAFE to attempt unconditionally. If we\'re inside the popup we opened
+         // from the order page, this closes it. If we\'re in a same-tab return,
+         // it does nothing and we fall through to the redirect logic.
+         // Try at multiple intervals because some browsers ignore close() before
+         // the page is fully loaded or in cross-origin nested-iframe contexts.
+         '    var closeAttempts = 0;' +
+         '    function tryClose(){' +
+         '      closeAttempts++;' +
+         '      try{ window.close(); }catch(_){}' +
+         '      try{ if(window.top && window.top!==window){ window.top.close(); } }catch(_){}' +
+         '      if(closeAttempts < 6) setTimeout(tryClose, 300);' +
          '    }' +
-         // Same-tab fallback path: try auto-navigate, then rely on user click.
+         '    tryClose();' +
+         // After close attempts, start the same-tab fallback path for users who
+         // landed here directly (without a popup). The redirect to GitHub Pages
+         // requires user activation in the iframe sandbox — we try anyway, and
+         // also wire up the whole-screen tap-anywhere navigation as a safety net.
          '    function go(){try{window.top.location.replace(URL);}catch(e){try{window.top.location.href=URL;}catch(_){window.location.href=URL;}}}' +
          '    try{window.top.location.replace(URL);}catch(_){}' +
          '    setTimeout(go,50);' +
