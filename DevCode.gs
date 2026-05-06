@@ -6590,26 +6590,37 @@ function hdfc_verifyReturnPayload(body) {
       const pendingRaw   = props.getProperty("HDFC_PENDING_ORDERS") || "{}";
       const pendingEntry = JSON.parse(pendingRaw)[orderId] || null;
       if (pendingEntry && pendingEntry.orders) {
-        const expected = _computeAuthoritativeTotal(pendingEntry.orders, pendingEntry.phone || "");
-        const charged  = Number(statusCheck.amount || 0);
-        // Reject if charged amount is below the authoritative total (₹1 rounding tolerance).
+        const fullTotal = _computeAuthoritativeTotal(pendingEntry.orders, pendingEntry.phone || "");
+        const charged   = Number(statusCheck.amount || 0);
+
+        // For Split (Wallet + HDFC) payments, HDFC only charges (total - walletApplied).
+        // The authoritative wallet portion was server-validated against SK_Wallet at
+        // hdfc_createSession time and stored in pendingEntry.wallet_applied. We use
+        // that value here so the post-payment check matches what HDFC actually charged.
+        const isSplit       = String(pendingEntry.payment_choice || "") === "Split";
+        const walletApplied = isSplit ? Number(pendingEntry.wallet_applied || 0) : 0;
+        const expected      = Math.max(0, fullTotal - walletApplied);
+
+        // Reject if charged amount is below the expected gateway portion (₹1 rounding tolerance).
         if (expected > 0 && charged < expected - 1) {
           console.error("⚠️ POST-PAYMENT AMOUNT TAMPER DETECTED — orderId=" + orderId
             + " phone=" + (pendingEntry.phone || "")
             + " charged=" + charged + " expected=" + expected
+            + " (fullTotal=" + fullTotal + " walletApplied=" + walletApplied + ")"
             + " — REJECTING order placement.");
           return {
             success: false,
             paid:    false,
             error:   "Payment amount mismatch detected (charged ₹" + charged
-                   + " vs order value ₹" + expected + "). The order has NOT been placed. "
+                   + " vs expected ₹" + expected + "). The order has NOT been placed. "
                    + "Please contact support — your payment will be refunded.",
             tamper_detected: true,
             charged_amount:  charged,
             expected_amount: expected
           };
         }
-        console.log("Amount validation OK — orderId=" + orderId + " charged=" + charged + " expected=" + expected);
+        console.log("Amount validation OK — orderId=" + orderId + " charged=" + charged
+          + " expected=" + expected + " (fullTotal=" + fullTotal + " wallet=" + walletApplied + ")");
       } else {
         console.warn("hdfc_verifyReturnPayload: no pending entry for amount validation — orderId=" + orderId);
       }
