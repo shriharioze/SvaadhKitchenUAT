@@ -4369,7 +4369,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.06.6-hdfc";
+    const APP_VERSION = "v26.05.06.7-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -8339,18 +8339,47 @@
 
       // Listen for popup → opener message via storage event (instant trigger)
       _hdfcInstallPopupResultListener(orderId, "hdfc_payment", async (data) => {
-        // Force-close the popup (cleanup) — opener owns it
         try { popup.close(); } catch(_) {}
         await runVerify(data.status || "CHARGED");
       });
 
-      // Fallback: poll popup state every second in case storage event is missed
+      // Triple-trigger to ensure verify always fires:
+      //   1. storage event from popup (instant, when same origin)
+      //   2. backend status poll (works regardless of popup origin/COOP)
+      //   3. popup.closed poll (fallback when popup self-closes)
+      // Whichever fires first wins; runVerify is idempotent.
+      let pollTicks = 0;
       const timer = setInterval(async () => {
         if (cancelled || verifyStarted) { clearInterval(timer); return; }
+        pollTicks++;
+
+        // Check popup state — if closed, run verify immediately
         let closed = true;
         try { closed = popup.closed; } catch(_) { closed = true; }
-        if (!closed) return;
-        await runVerify("CHARGED");
+        if (closed) {
+          await runVerify("CHARGED");
+          return;
+        }
+
+        // Every 2 seconds, also ask the backend if HDFC has confirmed CHARGED.
+        // This works even if the popup is stuck on script.google.com (cross-origin
+        // localStorage isolated). HDFC's webhook hits our backend the instant the
+        // payment succeeds — backend sees CHARGED before the popup even loads
+        // the return page.
+        if (pollTicks % 2 === 0) {
+          try {
+            const r = await fetch(APPS_SCRIPT_URL, {
+              method: "POST",
+              body: JSON.stringify({ _action: "hdfc_checkPaymentStatus", order_id: orderId })
+            });
+            const d = await r.json();
+            if (d && d.confirmed) {
+              try { popup.close(); } catch(_) {}
+              await runVerify(d.status || "CHARGED");
+              return;
+            }
+          } catch(_) { /* network blip, retry next tick */ }
+        }
       }, 1000);
     }
 
@@ -8431,12 +8460,37 @@
         await runFinalize();
       });
 
-      // Fallback poll
+      // Triple trigger (same pattern as order verify) — works even when
+      // popup is stuck on script.google.com origin:
+      //   1. storage event (when popup makes it to github.io)
+      //   2. backend status poll (works regardless of popup origin)
+      //   3. popup.closed poll (fallback)
+      let pollTicks = 0;
       const timer = setInterval(async () => {
         if (cancelled || verifyStarted) { clearInterval(timer); return; }
+        pollTicks++;
+
         let closed = true; try { closed = popup.closed; } catch(_) { closed = true; }
-        if (!closed) return;
-        await runFinalize();
+        if (closed) {
+          await runFinalize();
+          return;
+        }
+
+        // Backend status poll every 2s — HDFC webhook hits backend on success
+        if (pollTicks % 2 === 0) {
+          try {
+            const r = await fetch(APPS_SCRIPT_URL, {
+              method: "POST",
+              body: JSON.stringify({ _action: "hdfc_checkPaymentStatus", order_id: orderId })
+            });
+            const d = await r.json();
+            if (d && d.confirmed) {
+              try { popup.close(); } catch(_) {}
+              await runFinalize();
+              return;
+            }
+          } catch(_) {}
+        }
       }, 1000);
     }
 
