@@ -19,55 +19,64 @@
        ═══════════════════════════════════════════════════════════════════ -->
   <script>
     (function() {
+      // Detect popup via the localStorage marker the original tab wrote
+      // BEFORE opening the popup. This survives cross-origin navigations
+      // unlike window.opener / window.name (both reset by COOP).
       try {
-        var n = String(window.name || "");
-        if (n === "hdfc_payment" || n === "hdfc_recharge") {
-          var sp = new URLSearchParams(window.location.search || "");
-          var orderId = sp.get("hdfc_order_id") || sp.get("order_id") || "";
-          var status  = sp.get("hdfc_status")   || sp.get("status")   || "";
-          // Relay to opener tab via storage event (cross-tab, same-origin)
-          try {
-            localStorage.setItem("svaadh_hdfc_popup_result", JSON.stringify({
-              type:    n,            // hdfc_payment | hdfc_recharge
-              orderId: orderId,
-              status:  status,
-              ts:      Date.now()
-            }));
-          } catch(_) {}
-          // Try to self-close. window.close() works for script-opened windows.
-          var tried = false;
-          var doClose = function(){
-            if (tried) return; tried = true;
-            try { window.close(); } catch(_) {}
-            try { window.top.close(); } catch(_) {}
-          };
-          // Replace body with a friendly fallback message in case close fails
-          document.addEventListener("DOMContentLoaded", function() {
-            try {
-              document.title = "Payment Received";
-              document.body.innerHTML =
-                '<div style="font-family:system-ui,-apple-system,Arial,sans-serif;' +
-                'min-height:100vh;display:flex;flex-direction:column;align-items:center;' +
-                'justify-content:center;padding:40px 20px;text-align:center;background:#fef9f6;">' +
-                '<div style="font-size:3rem;color:#16a34a;margin-bottom:16px;">✓</div>' +
-                '<div style="font-size:1.4rem;font-weight:800;color:#222;margin-bottom:8px;">' +
-                'Payment Received</div>' +
-                '<div style="font-size:1rem;color:#666;margin-bottom:24px;">' +
-                'You can close this tab and return to your order.</div>' +
-                '<button onclick="window.close()" style="padding:12px 28px;background:#c0392b;color:#fff;' +
-                'border:none;border-radius:10px;font-size:1rem;font-weight:700;cursor:pointer;">' +
-                'Close</button></div>';
-            } catch(_) {}
-          });
-          // Aggressive auto-close attempts
-          doClose();
-          setTimeout(doClose, 100);
-          setTimeout(doClose, 800);
-          setTimeout(doClose, 1500);
-          // Stop the rest of the page from initialising
-          window.stop && window.stop();
-          throw new Error("HDFC popup intercepted — closing");
+        var raw = localStorage.getItem("svaadh_hdfc_popup_active");
+        if (!raw) return;
+        var m = JSON.parse(raw);
+        if (!m || !m.kind) return;
+        // Stale guard — 30 min
+        if (Date.now() - (m.ts || 0) > 30 * 60 * 1000) {
+          localStorage.removeItem("svaadh_hdfc_popup_active");
+          return;
         }
+        // We need URL params to know what to relay; if absent, this is
+        // probably the original tab and we should NOT intercept.
+        var sp = new URLSearchParams(window.location.search || "");
+        var status = sp.get("hdfc_status") || sp.get("status") || "";
+        if (!status) return;
+        var orderId = sp.get("hdfc_order_id") || sp.get("order_id") || "";
+
+        // We're in the popup — clear the marker, write result, close.
+        try { localStorage.removeItem("svaadh_hdfc_popup_active"); } catch(_) {}
+        var type = (m.kind === "recharge") ? "hdfc_recharge" : "hdfc_payment";
+        try {
+          localStorage.setItem("svaadh_hdfc_popup_result", JSON.stringify({
+            type: type, orderId: orderId, status: status, ts: Date.now()
+          }));
+        } catch(_) {}
+
+        // Replace body with friendly close-tab UI
+        document.addEventListener("DOMContentLoaded", function() {
+          try {
+            document.title = "Payment Received";
+            document.body.innerHTML =
+              '<div style="font-family:system-ui,-apple-system,Arial,sans-serif;' +
+              'min-height:100vh;display:flex;flex-direction:column;align-items:center;' +
+              'justify-content:center;padding:40px 20px;text-align:center;background:#fef9f6;">' +
+              '<div style="font-size:3rem;color:#16a34a;margin-bottom:16px;">✓</div>' +
+              '<div style="font-size:1.4rem;font-weight:800;color:#222;margin-bottom:8px;">' +
+              'Payment Received</div>' +
+              '<div style="font-size:1rem;color:#666;margin-bottom:24px;">' +
+              'You can safely close this window.<br>Your order is being confirmed in the original tab.</div>' +
+              '<button onclick="window.close()" style="padding:12px 28px;background:#c0392b;color:#fff;' +
+              'border:none;border-radius:10px;font-size:1rem;font-weight:700;cursor:pointer;">' +
+              'Close Window</button></div>';
+          } catch(_) {}
+        });
+        // Aggressive auto-close
+        var n = 0;
+        var doClose = function() {
+          n++;
+          try { window.close(); } catch(_) {}
+          if (n < 8) setTimeout(doClose, 250);
+        };
+        doClose();
+        // Halt rest of page init
+        window.stop && window.stop();
+        throw new Error("HDFC popup intercepted — closing");
       } catch(e) {
         if (String(e.message || "").indexOf("HDFC popup") === 0) throw e;
       }
@@ -4284,10 +4293,83 @@
     // Replaced with shared modals-svaadh.js logic
 
     // ═══════════════════════════════════════════════════════════
+    // POPUP-MODE DETECTION HELPERS
+    // ═══════════════════════════════════════════════════════════
+    /**
+     * Returns true if this tab is the HDFC payment popup we opened from
+     * the original order tab. Detection is via a localStorage marker
+     * written by the original tab BEFORE window.open(). The marker
+     * survives cross-origin navigations (HDFC → Apps Script → GitHub Pages)
+     * because localStorage is keyed only by origin (github.io), and the
+     * popup ends up on github.io same as the original tab.
+     *
+     * window.opener and window.name are both unreliable due to COOP on
+     * Apps Script's response — that's why we use localStorage.
+     *
+     * @param {"payment"|"recharge"} kind  expected marker kind
+     */
+    function _hdfcIsPopup(kind) {
+      try {
+        const m = JSON.parse(localStorage.getItem("svaadh_hdfc_popup_active") || "null");
+        if (!m || !m.kind) return false;
+        // Stale guard — markers older than 30 minutes are abandoned
+        if (Date.now() - (m.ts || 0) > 30 * 60 * 1000) {
+          localStorage.removeItem("svaadh_hdfc_popup_active");
+          return false;
+        }
+        if (kind && m.kind !== kind) return false;
+        return true;
+      } catch(_) { return false; }
+    }
+
+    /**
+     * Called from the popup tab to relay the HDFC return params to the
+     * original tab via a localStorage event, then attempt to self-close.
+     * If close fails (some browsers), shows a "Please close this tab"
+     * fallback message.
+     */
+    function _hdfcRelayAndClose(type, orderId, status) {
+      // Clear the active-popup marker so a future page load isn't misdetected
+      try { localStorage.removeItem("svaadh_hdfc_popup_active"); } catch(_) {}
+      // Write result so opener tab's storage listener picks it up
+      try {
+        localStorage.setItem("svaadh_hdfc_popup_result", JSON.stringify({
+          type: type, orderId: orderId, status: status, ts: Date.now()
+        }));
+      } catch(_) {}
+      // Clean URL so it doesn't get processed if user reloads
+      try { window.history.replaceState({}, "", window.location.pathname); } catch(_) {}
+      // Replace body with a friendly "payment received" UI — visible if
+      // window.close() is blocked by the browser.
+      try {
+        document.body.innerHTML =
+          '<div style="font-family:system-ui,-apple-system,Arial,sans-serif;' +
+          'min-height:100vh;display:flex;flex-direction:column;align-items:center;' +
+          'justify-content:center;padding:40px 20px;text-align:center;background:#fef9f6;">' +
+          '<div style="font-size:3rem;color:#16a34a;margin-bottom:16px;">✓</div>' +
+          '<div style="font-size:1.4rem;font-weight:800;color:#222;margin-bottom:8px;">' +
+          'Payment Received</div>' +
+          '<div style="font-size:1rem;color:#666;margin-bottom:24px;">' +
+          'You can safely close this window.<br>Your order is being confirmed in the original tab.</div>' +
+          '<button onclick="window.close()" style="padding:12px 28px;background:#c0392b;' +
+          'color:#fff;border:none;border-radius:10px;font-size:1rem;font-weight:700;cursor:pointer;">' +
+          'Close Window</button></div>';
+      } catch(_) {}
+      // Aggressive auto-close attempts
+      var n = 0;
+      var doClose = function() {
+        n++;
+        try { window.close(); } catch(_) {}
+        if (n < 8) setTimeout(doClose, 250);
+      };
+      doClose();
+    }
+
+    // ═══════════════════════════════════════════════════════════
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.06.5-hdfc";
+    const APP_VERSION = "v26.05.06.6-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -6448,6 +6530,13 @@
         "width=520,height=720,menubar=no,toolbar=no,location=yes");
       const _blocked = !popup || popup.closed || typeof popup.closed === "undefined";
 
+      // Popup marker — set before navigation so popup can detect itself
+      // even after COOP nullifies window.opener and window.name.
+      try {
+        localStorage.setItem("svaadh_hdfc_popup_active",
+          JSON.stringify({ kind: "recharge", ts: Date.now() }));
+      } catch(_) {}
+
       if (popup && !_blocked) {
         try {
           popup.document.write(
@@ -6494,6 +6583,7 @@
 
         if (_blocked) {
           // Popup was blocked → same-tab fallback
+          try { localStorage.removeItem("svaadh_hdfc_popup_active"); } catch(_) {}
           window.location.href = data.payment_url;
           return;
         }
@@ -6558,34 +6648,10 @@
       // Only finalize if URL params suggest a successful return
       if (!status) return;
 
-      // ── Detect popup mode and notify opener ───────────────────────────
-      // If we're running in the popup (opener exists OR window.name was set
-      // by us), tell the original tab via localStorage event and self-close.
-      // The original tab will run its own finalize path which is the canonical
-      // place to show success — running it here AND there causes confusion.
-      let _isPopup = false;
-      try { _isPopup = !!window.opener && !window.opener.closed; } catch(_) {}
-      try { if (window.name === "hdfc_recharge") _isPopup = true; } catch(_) {}
-      if (_isPopup) {
-        try {
-          localStorage.setItem("svaadh_hdfc_popup_result", JSON.stringify({
-            type: "hdfc_recharge", orderId: pendingId, status: status, ts: Date.now()
-          }));
-        } catch(_) {}
-        try { window.history.replaceState({}, "", window.location.pathname); } catch(_) {}
-        // Show a brief "payment received" UI then close
-        try {
-          document.body.innerHTML =
-            '<div style="font-family:system-ui,-apple-system,Arial,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;text-align:center;background:#fef9f6;">' +
-            '<div style="font-size:3rem;color:#16a34a;margin-bottom:16px;">✓</div>' +
-            '<div style="font-size:1.4rem;font-weight:800;color:#222;margin-bottom:8px;">Payment Received</div>' +
-            '<div style="font-size:1rem;color:#666;">Closing this tab automatically…</div>' +
-            '</div>';
-        } catch(_) {}
-        var _tryC = 0;
-        var _doClose = function(){ _tryC++; try{ window.close(); }catch(_){}; if(_tryC<6) setTimeout(_doClose, 300); };
-        _doClose();
-        return; // do NOT run the rest — opener will handle it
+      // ── Detect popup mode via localStorage marker (see hdfc_handleReturnParams) ──
+      if (_hdfcIsPopup("recharge")) {
+        _hdfcRelayAndClose("hdfc_recharge", pendingId, status);
+        return; // do NOT finalize here — opener will
       }
 
       // Remove early overlay BEFORE any sAlert below
@@ -7961,11 +8027,20 @@
       // ── POPUP MUST OPEN INSIDE USER-ACTIVATION WINDOW ─────────────────
       // Browsers block window.open() after async work loses user activation.
       // Open the popup IMMEDIATELY here with about:blank, then navigate it
-      // to the actual payment URL once the session is ready below. This is
-      // the same trick wallet recharge uses.
+      // to the actual payment URL once the session is ready below.
       const popup = window.open("about:blank", "hdfc_payment",
         "width=520,height=720,menubar=no,toolbar=no,location=yes");
       const _popupBlocked = !popup || popup.closed || typeof popup.closed === "undefined";
+
+      // ── POPUP MARKER (most reliable detection) ────────────────────────
+      // Set BEFORE opening popup so once the popup returns to github.io
+      // order.html, it can read this marker from localStorage (same origin)
+      // and know it's the popup, not the original tab. Cleared in same-tab
+      // fallback path below.
+      try {
+        localStorage.setItem("svaadh_hdfc_popup_active",
+          JSON.stringify({ kind: "payment", ts: Date.now() }));
+      } catch(_) {}
 
       // Disable + show loading text on whichever Pay button is currently visible
       // (regular Gateway flow uses #hdfcPayBtn; Split flow uses #splitHdfcPayBtn)
@@ -8070,6 +8145,8 @@
         if (data.success && data.payment_url) {
           if (_popupBlocked) {
             // Popup was blocked by browser → fall back to same-tab redirect.
+            // CLEAR the popup marker — this tab will be the one returning.
+            try { localStorage.removeItem("svaadh_hdfc_popup_active"); } catch(_) {}
             console.warn("Popup blocked — falling back to same-tab redirect.");
             window.location.href = data.payment_url;
             return;
@@ -8385,38 +8462,19 @@
 
       // ── Skip wallet-recharge IDs (SK<YYMMDD>W…) — those are handled by
       //    hdfc_handleRechargeReturn, not by this order-payment handler.
-      //    Without this guard the order flow would try to verify a recharge
-      //    and fall into the misleading "Your order ID: …" fallback alert.
       if (/^SK\d{6}W/.test(orderId)) {
         try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch(_) {}
         return;
       }
 
-      // ── Detect popup mode and notify opener ────────────────────────────
-      // If we're running inside the payment popup (window.opener exists or
-      // window.name marker is set), don't run the verify flow here — relay
-      // the result to the original tab via storage event and self-close.
-      let _isPopup = false;
-      try { _isPopup = !!window.opener && !window.opener.closed; } catch(_) {}
-      try { if (window.name === "hdfc_payment") _isPopup = true; } catch(_) {}
-      if (_isPopup) {
-        try {
-          localStorage.setItem("svaadh_hdfc_popup_result", JSON.stringify({
-            type: "hdfc_payment", orderId: orderId, status: status, ts: Date.now()
-          }));
-        } catch(_) {}
-        try { window.history.replaceState({}, "", window.location.pathname); } catch(_) {}
-        try {
-          document.body.innerHTML =
-            '<div style="font-family:system-ui,-apple-system,Arial,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;text-align:center;background:#fef9f6;">' +
-            '<div style="font-size:3rem;color:#16a34a;margin-bottom:16px;">✓</div>' +
-            '<div style="font-size:1.4rem;font-weight:800;color:#222;margin-bottom:8px;">Payment Received</div>' +
-            '<div style="font-size:1rem;color:#666;">Closing this tab automatically…</div>' +
-            '</div>';
-        } catch(_) {}
-        var _tryC2 = 0;
-        var _doClose2 = function(){ _tryC2++; try{ window.close(); }catch(_){}; if(_tryC2<6) setTimeout(_doClose2, 300); };
-        _doClose2();
+      // ── Detect popup mode via localStorage marker (set by original tab
+      //    BEFORE opening the popup, so it survives any cross-origin
+      //    navigation since localStorage is same-origin). This is the
+      //    most reliable way to know whether we're the original tab or
+      //    the popup — window.opener and window.name both get reset by
+      //    Cross-Origin-Opener-Policy on Apps Script's response.
+      if (_hdfcIsPopup("payment")) {
+        _hdfcRelayAndClose("hdfc_payment", orderId, status);
         return; // do NOT run verify — opener will handle it
       }
 
