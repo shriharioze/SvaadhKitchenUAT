@@ -4220,7 +4220,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.05.11-hdfc";
+    const APP_VERSION = "v26.05.05.12-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -6412,14 +6412,28 @@
      * wallet with the actual charged amount). Idempotent — backend dedupes by Ref_Code.
      */
     async function hdfc_handleRechargeReturn() {
-      let pendingId, ts;
-      try {
-        pendingId = localStorage.getItem("svaadh_hdfc_pending_recharge");
-        ts = parseInt(localStorage.getItem("svaadh_hdfc_pending_recharge_ts") || "0", 10);
-      } catch(_) {}
+      // Prefer the URL-provided order_id (works across origins), fall back to
+      // localStorage (works when same-origin only). The 'W' marker tells us
+      // it's a recharge — same scheme as orders use 'G'.
+      const sp = new URLSearchParams(window.location.search);
+      let urlOrderId = sp.get("hdfc_order_id") || sp.get("order_id") || "";
+      const status   = sp.get("hdfc_status")   || sp.get("status");
+
+      let pendingId = "", ts = 0;
+      if (urlOrderId && /^SK\d{6}W/.test(urlOrderId)) {
+        // URL gave us a recharge ID directly
+        pendingId = urlOrderId;
+      } else {
+        try {
+          const lsId = localStorage.getItem("svaadh_hdfc_pending_recharge");
+          ts = parseInt(localStorage.getItem("svaadh_hdfc_pending_recharge_ts") || "0", 10);
+          if (lsId && /^SK\d{6}W/.test(lsId)) pendingId = lsId;
+        } catch(_) {}
+      }
+
       if (!pendingId) return;
 
-      // Stale guard: discard if older than 30 minutes
+      // Stale guard: discard if older than 30 minutes (only applies to localStorage entries)
       if (ts && (Date.now() - ts) > 30*60*1000) {
         try {
           localStorage.removeItem("svaadh_hdfc_pending_recharge");
@@ -6429,9 +6443,7 @@
       }
 
       // Only finalize if URL params suggest a successful return
-      const sp = new URLSearchParams(window.location.search);
-      const status = sp.get("hdfc_status") || sp.get("status");
-      if (!status) return; // not a return — let it sit, user may still complete payment
+      if (!status) return;
 
       // Remove early overlay BEFORE any sAlert below
       const _early = document.getElementById("hdfc-early-overlay");
@@ -6455,17 +6467,26 @@
         if (ov) ov.remove();
 
         if (data.success) {
-          if (data.already_credited) {
-            // Silent — already done
-          } else {
+          if (!data.already_credited) {
             await sAlert(
               "Your wallet has been credited with ₹" + (data.amount_credited || 0) + ".",
               "Wallet Recharged ✅", "💰"
             );
-            // Refresh balance display
-            try { syncWalletValue && syncWalletValue(); } catch(_) {}
-            try { refreshWalletBalance && refreshWalletBalance(); } catch(_) {}
           }
+          // Refresh balance display
+          try { syncWalletValue && syncWalletValue(); } catch(_) {}
+          try { refreshWalletBalance && refreshWalletBalance(); } catch(_) {}
+          // Land the customer on Step 3 (date selection) instead of phone-entry —
+          // they're already logged in (we have S.phone in the saved state) and most
+          // likely came back to place an order using the freshly-recharged wallet.
+          try {
+            if (S.phone && typeof goToStep === "function") {
+              S.step = 2;       // 0=phone, 1=profile, 2=dates, 3=meals, 4=review
+              if (typeof updateNav === "function") updateNav();
+              if (typeof renderCalendar === "function") renderCalendar();
+              window.scrollTo(0, 0);
+            }
+          } catch(_) {}
         } else {
           await sAlert(
             "Recharge could not be confirmed.\n\n" + (data.error || "") +
@@ -7909,6 +7930,15 @@
       }
 
       if (!orderId || !status) return;   // Not a gateway return, normal page load
+
+      // ── Skip wallet-recharge IDs (SK<YYMMDD>W…) — those are handled by
+      //    hdfc_handleRechargeReturn, not by this order-payment handler.
+      //    Without this guard the order flow would try to verify a recharge
+      //    and fall into the misleading "Your order ID: …" fallback alert.
+      if (/^SK\d{6}W/.test(orderId)) {
+        try { localStorage.removeItem("svaadh_hdfc_pending_order"); } catch(_) {}
+        return;
+      }
 
       // Remove the early overlay BEFORE we may show sAlert below — otherwise
       // the spinner sits on top and the user can't click OK on the alert.

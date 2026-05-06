@@ -362,14 +362,20 @@ function doGet(e) {
   // If order_id is missing, recover it from the most recent HDFC_PENDING_ORDERS entry.
   const _HDFC_STATUSES = ["CHARGED","SUCCESS","PENDING","PENDING_VBV","AUTHENTICATION_FAILED","AUTHORIZATION_FAILED","JUSPAY_DECLINED","FAILURE","DECLINED"];
   if (p.status && !p.action && !p._action && _HDFC_STATUSES.indexOf(String(p.status).toUpperCase()) !== -1) {
-    // Recover order_id if missing
+    // Recover order_id if missing — check BOTH PENDING_ORDERS and PENDING_RECHARGES.
+    // Whichever has the most-recent entry wins. The frontend uses the 'W' marker
+    // in the order_id to route to the correct return handler (recharge vs order).
     if (!p.order_id) {
       try {
-        const pending = JSON.parse(PropertiesService.getScriptProperties().getProperty("HDFC_PENDING_ORDERS") || "{}");
-        const keys = Object.keys(pending);
-        if (keys.length) {
-          keys.sort(function(a,b) { return (pending[b].ts||0) - (pending[a].ts||0); });
-          p.order_id = keys[0];
+        const props      = PropertiesService.getScriptProperties();
+        const pendingO   = JSON.parse(props.getProperty("HDFC_PENDING_ORDERS")    || "{}");
+        const pendingR   = JSON.parse(props.getProperty("HDFC_PENDING_RECHARGES") || "{}");
+        const candidates = []
+          .concat(Object.keys(pendingO).map(function(k){ return { id: k, ts: pendingO[k].ts || 0 }; }))
+          .concat(Object.keys(pendingR).map(function(k){ return { id: k, ts: pendingR[k].ts || 0 }; }));
+        if (candidates.length) {
+          candidates.sort(function(a,b) { return b.ts - a.ts; });
+          p.order_id = candidates[0].id;
         }
       } catch(_) {}
     }
@@ -546,14 +552,18 @@ function doPost(e) {
     if (isHdfcReturn) {
       // Merge all params from both sources
       const allParams = Object.assign({}, formParams, parsedForHdfc);
-      // Recover order_id if missing
+      // Recover order_id if missing — check both ORDERS and RECHARGES pending.
       if (!allParams.order_id) {
         try {
-          const pending = JSON.parse(PropertiesService.getScriptProperties().getProperty("HDFC_PENDING_ORDERS") || "{}");
-          const keys = Object.keys(pending);
-          if (keys.length) {
-            keys.sort(function(a,b) { return (pending[b].ts||0) - (pending[a].ts||0); });
-            allParams.order_id = keys[0];
+          const props      = PropertiesService.getScriptProperties();
+          const pendingO   = JSON.parse(props.getProperty("HDFC_PENDING_ORDERS")    || "{}");
+          const pendingR   = JSON.parse(props.getProperty("HDFC_PENDING_RECHARGES") || "{}");
+          const candidates = []
+            .concat(Object.keys(pendingO).map(function(k){ return { id: k, ts: pendingO[k].ts || 0 }; }))
+            .concat(Object.keys(pendingR).map(function(k){ return { id: k, ts: pendingR[k].ts || 0 }; }));
+          if (candidates.length) {
+            candidates.sort(function(a,b) { return b.ts - a.ts; });
+            allParams.order_id = candidates[0].id;
           }
         } catch(_) {}
       }
@@ -4921,45 +4931,62 @@ function hdfc_finalizeWalletRecharge(orderId) {
   if (!oid) return { error: "order_id required" };
   if (oid.indexOf("W") === -1) return { error: "Not a wallet-recharge order" };
 
-  // Idempotency: check if already credited
+  // ── Race-condition lock ─────────────────────────────────────────────────
+  // Webhook + customer-return can call this simultaneously. Without a lock,
+  // both can pass the idempotency check before either writes, producing
+  // duplicate credits. Hold an exclusive script lock for the duration.
+  const lock = LockService.getScriptLock();
   try {
+    lock.waitLock(15000);
+  } catch (e) {
+    console.warn("hdfc_finalizeWalletRecharge: could not acquire lock for " + oid + " — assuming concurrent finalize, treating as already-credited.");
+    return { success: true, already_credited: true, message: "Concurrent finalize in progress" };
+  }
+
+  try {
+    // Idempotency: check if already credited (column is "Reference_ID", not "Ref_Code")
     const wsAll = getOrCreateTab(getSpreadsheet(), TAB_WALLET, WALLET_HEADERS).getDataRange().getValues();
-    const refCol = (wsAll[0] || []).indexOf("Ref_Code");
+    const headerRow = wsAll[0] || [];
+    const refCol = headerRow.indexOf("Reference_ID");
     if (refCol !== -1) {
       for (let i = 1; i < wsAll.length; i++) {
         if (String(wsAll[i][refCol] || "").trim() === oid) {
+          console.log("hdfc_finalizeWalletRecharge: " + oid + " already credited — skipping.");
           return { success: true, already_credited: true, message: "Already credited" };
         }
       }
     }
-  } catch(_) {}
 
-  // Mandatory Status API check — single source of truth for charged amount
-  const statusCheck = hdfc_getOrderStatus(oid);
-  if (!statusCheck.confirmed) {
-    return { error: "Payment not confirmed by gateway. Status: " + statusCheck.status };
+    // Mandatory Status API check — single source of truth for charged amount
+    const statusCheck = hdfc_getOrderStatus(oid);
+    if (!statusCheck.confirmed) {
+      return { error: "Payment not confirmed by gateway. Status: " + statusCheck.status };
+    }
+    const chargedAmount = Math.round(Number(statusCheck.amount || 0));
+    if (chargedAmount <= 0) {
+      return { error: "Gateway reports zero charged amount." };
+    }
+
+    // Look up phone/name from pending entry
+    let phone = "", name = "Customer";
+    try {
+      const pending = JSON.parse(PropertiesService.getScriptProperties().getProperty("HDFC_PENDING_RECHARGES") || "{}");
+      const entry = pending[oid];
+      if (entry) { phone = entry.phone || ""; name = entry.name || "Customer"; }
+    } catch(_) {}
+    if (!phone) {
+      return { error: "Could not identify customer for recharge " + oid };
+    }
+
+    // Credit exactly the gateway-confirmed amount. Verified=true (gateway is trusted).
+    _appendWalletTransaction(phone, name, "Recharge (HDFC Gateway)", chargedAmount, true, oid);
+    SpreadsheetApp.flush(); // ensure write is committed before lock release
+    console.log("hdfc_finalizeWalletRecharge: credited ₹" + chargedAmount + " to " + phone + " (order " + oid + ")");
+
+    return { success: true, amount_credited: chargedAmount, phone: phone };
+  } finally {
+    try { lock.releaseLock(); } catch(_) {}
   }
-  const chargedAmount = Math.round(Number(statusCheck.amount || 0));
-  if (chargedAmount <= 0) {
-    return { error: "Gateway reports zero charged amount." };
-  }
-
-  // Look up phone/name from pending entry (or recover from Status API customer_id)
-  let phone = "", name = "Customer";
-  try {
-    const pending = JSON.parse(PropertiesService.getScriptProperties().getProperty("HDFC_PENDING_RECHARGES") || "{}");
-    const entry = pending[oid];
-    if (entry) { phone = entry.phone || ""; name = entry.name || "Customer"; }
-  } catch(_) {}
-  if (!phone) {
-    return { error: "Could not identify customer for recharge " + oid };
-  }
-
-  // Credit exactly the gateway-confirmed amount. Verified=true (gateway is trusted).
-  _appendWalletTransaction(phone, name, "Recharge (HDFC Gateway)", chargedAmount, true, oid);
-  console.log("hdfc_finalizeWalletRecharge: credited ₹" + chargedAmount + " to " + phone + " (order " + oid + ")");
-
-  return { success: true, amount_credited: chargedAmount, phone: phone };
 }
 
 /**
