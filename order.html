@@ -4369,7 +4369,7 @@
     // CONFIG
     // ═══════════════════════════════════════════════════════════
     const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw_yJ8__7phuGfdSvclc5FVdpuM7WHffq4ybPrxYJUBp1frhiN1HZA2lcNUGSqlm1INHg/exec"; // DEV — Svaadh Kitchen Dev project
-    const APP_VERSION = "v26.05.06.7-hdfc";
+    const APP_VERSION = "v26.05.06.8-hdfc";
     const UPI_VPA = "svaadhkitchen.36727659@hdfcbank";
     const UPI_NAME = "Svaadh Kitchen";
     let FREE_AREAS = ["Bhosale Nagar"];   // populated dynamically from API
@@ -8233,10 +8233,10 @@
             <circle cx="24" cy="24" r="20" stroke="#eee" stroke-width="5"/>
             <path d="M44 24a20 20 0 0 0-20-20" stroke="#c0392b" stroke-width="5" stroke-linecap="round"/>
           </svg>
-          <div style="font-size:1.1rem;font-weight:700;color:#222;margin-bottom:8px;">
+          <div id="hdfcWaitTitle" style="font-size:1.1rem;font-weight:700;color:#222;margin-bottom:8px;">
             Complete Payment
           </div>
-          <div style="font-size:0.88rem;color:#666;line-height:1.5;margin-bottom:20px;">
+          <div id="hdfcWaitBody" style="font-size:0.88rem;color:#666;line-height:1.5;margin-bottom:20px;">
             Pay securely on the HDFC tab.<br>
             We'll automatically verify your payment when you're done.
           </div>
@@ -8259,14 +8259,23 @@
       // Shared verify routine — called from either:
       //   (a) storage event from popup (preferred — fires immediately)
       //   (b) popup.closed poll (fallback if storage event missed)
+      //   (c) backend status poll (works even when popup is on different origin)
       let verifyStarted = false;
       const runVerify = async (statusFromPopup) => {
         if (verifyStarted) return;
         verifyStarted = true;
-        clearInterval(timer);
-        // Update overlay to "Verifying"
-        ov.querySelector("div > div").textContent = "Verifying Payment";
-        ov.querySelector("div > div + div").innerHTML = "Confirming with HDFC…<br>Please wait.";
+        try { clearInterval(timer); } catch(_) {}
+        // Update overlay to "Verifying" — use IDs (NOT querySelector chains
+        // that mutate sibling structure; the previous version threw a
+        // null-reference error and silently halted the whole flow).
+        try {
+          const t = document.getElementById("hdfcWaitTitle");
+          const b = document.getElementById("hdfcWaitBody");
+          if (t) t.textContent = "Verifying Payment";
+          if (b) b.innerHTML   = "Confirming with HDFC…<br>Please wait.";
+          const c = document.getElementById("hdfcCancelWaiting");
+          if (c) c.style.display = "none";
+        } catch(_) {}
         try {
           const res = await fetch(APPS_SCRIPT_URL, {
             method: "POST",
@@ -8278,13 +8287,21 @@
             })
           });
           const data = await res.json();
-          ov.remove();
+          // Update text again — placing order takes a few seconds
+          try {
+            const t = document.getElementById("hdfcWaitTitle");
+            const b = document.getElementById("hdfcWaitBody");
+            if (t) t.textContent = "Placing Your Order";
+            if (b) b.innerHTML   = "Just a moment…";
+          } catch(_) {}
 
           if (data.error && data.tamper_detected) {
+            try { ov.remove(); } catch(_) {}
             await sAlert(data.error, "Payment Mismatch", "❌");
             return;
           }
           if (data.error) {
+            try { ov.remove(); } catch(_) {}
             await sAlert(
               "Could not verify payment.\n\nIf money was deducted, WhatsApp us at +91 93222 46765 with order ID: " + orderId + "\n\nError: " + data.error,
               "Verification Issue", "⚠️"
@@ -8324,8 +8341,12 @@
               localStorage.removeItem("svaadh_hdfc_pending_order");
               localStorage.removeItem("svaadh_hdfc_pending_ts");
             } catch (_) {}
+            // Remove our overlay BEFORE hdfc_submitVerifiedOrder — it has its
+            // own sLoading and showSuccess overlays that would otherwise stack.
+            try { ov.remove(); } catch(_) {}
             await hdfc_submitVerifiedOrder(orderId, "CHARGED");
           } else {
+            try { ov.remove(); } catch(_) {}
             await sAlert(
               "Payment was not completed. If money was deducted, WhatsApp us at +91 93222 46765 with order ID: " + orderId,
               "Payment Not Confirmed", "⚠️"
