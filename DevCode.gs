@@ -4794,7 +4794,7 @@ function archiveQuarter(year, quarter) {
 function _getArchiveYearFolder(year) {
   var yearStr = String(year);
   try {
-    // Step 1: Find or create "Archive" folder under "Web Based Ordering"
+    // Step 1: Find or create "Archive" folder under the project root folder
     var archiveFolder = null;
 
     var props = PropertiesService.getScriptProperties();
@@ -4804,11 +4804,20 @@ function _getArchiveYearFolder(year) {
     }
 
     if (!archiveFolder) {
-      var rootFolders = DriveApp.getFoldersByName("Web Based Ordering");
+      // Try common spelling variants of the project root folder
+      var NAME_VARIANTS = [
+        "WebBased Ordering",   // current production folder (confirmed)
+        "Web Based Ordering",
+        "Web-Based Ordering",
+        "Webbased Ordering"
+      ];
       var webOrdering = null;
-      if (rootFolders.hasNext()) webOrdering = rootFolders.next();
+      for (var i = 0; i < NAME_VARIANTS.length && !webOrdering; i++) {
+        var rootFolders = DriveApp.getFoldersByName(NAME_VARIANTS[i]);
+        if (rootFolders.hasNext()) webOrdering = rootFolders.next();
+      }
       if (!webOrdering) {
-        Logger.log("_getArchiveYearFolder: 'Web Based Ordering' folder not found. Archive will stay in My Drive root.");
+        Logger.log("_getArchiveYearFolder: parent folder not found (tried " + NAME_VARIANTS.join(", ") + "). Archive will stay in My Drive root.");
         return null;
       }
       var archiveFolders = webOrdering.getFoldersByName("Archive");
@@ -4849,9 +4858,13 @@ function _listArchiveFilesInRange(dateFrom, dateTo) {
       try { archiveFolder = DriveApp.getFolderById(configuredId); } catch(_) {}
     }
     if (!archiveFolder) {
-      var rootFolders = DriveApp.getFoldersByName("Web Based Ordering");
-      if (!rootFolders.hasNext()) return out;
-      var webOrdering = rootFolders.next();
+      var NAME_VARIANTS = ["WebBased Ordering", "Web Based Ordering", "Web-Based Ordering", "Webbased Ordering"];
+      var webOrdering = null;
+      for (var k = 0; k < NAME_VARIANTS.length && !webOrdering; k++) {
+        var rootFolders = DriveApp.getFoldersByName(NAME_VARIANTS[k]);
+        if (rootFolders.hasNext()) webOrdering = rootFolders.next();
+      }
+      if (!webOrdering) return out;
       var archiveFolders = webOrdering.getFoldersByName("Archive");
       if (!archiveFolders.hasNext()) return out;
       archiveFolder = archiveFolders.next();
