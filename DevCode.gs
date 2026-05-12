@@ -12,7 +12,7 @@ const KITCHEN_PIN    = SP.getProperty("KITCHEN_PIN") || "7284";
 const PLACE_ID       = SP.getProperty("PLACE_ID") || "";
 const GOOGLE_PLACES_API_KEY = SP.getProperty("GOOGLE_PLACES_API_KEY") || "";
 
-const CODE_VERSION   = 14.5; // HDFC auto-reconciliation (self-healing stuck orders)
+const CODE_VERSION   = 14.6; // Reconciler webhook-log fallback when Status API unavailable
 const LEDGER_FOLDER  = "Svaadh Customer Ledgers";
 
 // ── PAYMENT GATEWAY CONFIG ───────────────────────────────────
@@ -7344,9 +7344,29 @@ function _reconcileSingleEntry(orderId, entry) {
     }
 
     // ── Ask HDFC: is this actually CHARGED? ─────────────────────────────────
+    // Primary: Status API call. Fallback: SK_Webhook_Log (HDFC's own
+    // server-to-server ORDER_SUCCEEDED event, equally authoritative).
+    // The fallback fires when the Status API can't be reached due to
+    // urlfetch quota exhaustion or transient errors — without it, a
+    // quota-exhausted day would block ALL stuck-order recovery until
+    // midnight PST.
     var statusCheck;
     try { statusCheck = hdfc_getOrderStatus(orderId); }
-    catch (e) { return { outcome: "errors", reason: "Status API: " + e.message }; }
+    catch (e) { statusCheck = { confirmed: false, status: "FETCH_ERROR", amount: 0 }; }
+
+    if (!statusCheck.confirmed) {
+      const transient = (statusCheck.status === "FETCH_ERROR" ||
+                         statusCheck.status === "API_ERROR" ||
+                         statusCheck.status === "UNKNOWN" ||
+                         statusCheck.status === "NEW");
+      if (transient) {
+        const webhookProof = _checkWebhookLogForCharge(orderId);
+        if (webhookProof) {
+          Logger.log("reconcile: " + orderId + " — Status API unavailable (" + statusCheck.status + "), but ORDER_SUCCEEDED webhook found in SK_Webhook_Log. Trusting webhook.");
+          statusCheck = { confirmed: true, status: "CHARGED", amount: webhookProof.amount };
+        }
+      }
+    }
     if (!statusCheck.confirmed) {
       return { outcome: "skippedNotCharged", status: statusCheck.status };
     }
@@ -7464,6 +7484,54 @@ function _buildSubmitBodyFromPending(orderId, entry, statusCheck) {
     // Tag the source so logs make it clear this row came from the reconciler
     placed_via:       "reconciler"
   };
+}
+
+/**
+ * Searches SK_Webhook_Log for a verified ORDER_SUCCEEDED event for this
+ * order_id. Returns { amount } if found and verified, null otherwise.
+ *
+ * Used as a fallback when the HDFC Status API can't be reached (urlfetch
+ * quota exhausted, network error, etc). The webhook is HDFC's own
+ * server-to-server notification — once we have it (and HMAC has passed,
+ * which our handler already enforces before logging), we can trust it.
+ *
+ * Walks backwards from the most recent webhook entries since stuck orders
+ * are usually recent.
+ */
+function _checkWebhookLogForCharge(orderId) {
+  try {
+    const ss = getSpreadsheet();
+    const ws = ss.getSheetByName(TAB_WEBHOOK_LOG);
+    if (!ws) return null;
+    const data = ws.getDataRange().getValues();
+    if (data.length < 2) return null;
+    const headers     = data[0] || [];
+    const orderIdCol  = headers.indexOf("Order_ID");
+    const eventCol    = headers.indexOf("Event_Name");
+    const payloadCol  = headers.indexOf("Raw_Payload");
+    if (orderIdCol === -1 || eventCol === -1 || payloadCol === -1) return null;
+
+    // Walk newest → oldest (recent webhook events are at the bottom)
+    for (let r = data.length - 1; r >= 1; r--) {
+      if (String(data[r][orderIdCol] || "").trim() !== orderId) continue;
+      if (String(data[r][eventCol]   || "").trim() !== "ORDER_SUCCEEDED") continue;
+      try {
+        const payload   = JSON.parse(data[r][payloadCol] || "{}");
+        const order     = (payload.content && payload.content.order) || {};
+        const txnDetail = order.txn_detail || {};
+        const status    = String(txnDetail.status || order.status || "").trim().toUpperCase();
+        const amount    = Number(txnDetail.txn_amount || order.amount || 0);
+        if (status === "CHARGED" && amount > 0) {
+          return { amount: amount, source: "webhook_log", logRow: r + 1 };
+        }
+      } catch (e) {
+        // Bad JSON in this row, keep walking
+      }
+    }
+  } catch (e) {
+    Logger.log("_checkWebhookLogForCharge error: " + e.message);
+  }
+  return null;
 }
 
 
