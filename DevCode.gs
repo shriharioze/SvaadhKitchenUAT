@@ -12,7 +12,7 @@ const KITCHEN_PIN    = SP.getProperty("KITCHEN_PIN") || "7284";
 const PLACE_ID       = SP.getProperty("PLACE_ID") || "";
 const GOOGLE_PLACES_API_KEY = SP.getProperty("GOOGLE_PLACES_API_KEY") || "";
 
-const CODE_VERSION   = 14.6; // Reconciler webhook-log fallback when Status API unavailable
+const CODE_VERSION   = 14.7; // Gateway_Order_ID idempotency + stop trusting client status
 const LEDGER_FOLDER  = "Svaadh Customer Ledgers";
 
 // ── PAYMENT GATEWAY CONFIG ───────────────────────────────────
@@ -843,6 +843,15 @@ function doPost(e) {
       return jsonRes(reconcilePendingOrders() || {});
     }
 
+    if (action === "voidOrderRow") {
+      // Admin: mark an SK_Orders row as Voided (e.g. when HDFC says
+      // AUTHORIZATION_FAILED but our row was incorrectly created as Paid,
+      // or a duplicate row needs to be invalidated). Doesn't delete — keeps
+      // the row for audit, just changes Payment_Status and appends a note.
+      if (!isAdmin) return jsonRes({error:"STRICT ADMIN PIN REQUIRED"});
+      return jsonRes(voidOrderRow(body.submissionId, body.reason || "Admin void"));
+    }
+
     if (action === "hdfc_getMostRecentPending") {
       // Returns the most recent pending HDFC order_id that is BOTH:
       //   (a) <30 min old in HDFC_PENDING_ORDERS, AND
@@ -1339,6 +1348,65 @@ function submitOrder(body) {
   const ordersWs = getOrCreateTab(ss, TAB_ORDERS, ORDERS_HEADERS);
   const profile   = body.profile || {};
   const orders    = body.orders  || [];   // [{date, meals:[{type,items,notes,subtotal,area}]}]
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // IDEMPOTENCY GUARD — Gateway_Order_ID
+  // If this submission carries a gateway_order_id and a row already exists
+  // in SK_Orders with that same Gateway_Order_ID, return the existing
+  // Submission_IDs instead of writing duplicates. Wrapped in LockService so
+  // two concurrent calls (double-click, retry, race) serialise and only the
+  // first one writes — the second sees the row written by the first and
+  // returns success without inserting again.
+  //
+  // This is the fix for the SK-20260513-6512 / SK-20260513-6666 duplicate
+  // (same Gateway_Order_ID, 1 second apart, both rows landed because
+  // submitOrder had no gateway-level dedup).
+  // ─────────────────────────────────────────────────────────────────────────
+  const gatewayOrderIdGuard = String(body.gateway_order_id || "").trim();
+  const submitLock = LockService.getScriptLock();
+  try {
+    submitLock.waitLock(20 * 1000);
+  } catch (e) {
+    return { success: false, error: "Server busy. Please retry in a moment." };
+  }
+
+  try {
+    if (gatewayOrderIdGuard) {
+      const _existingData = ordersWs.getDataRange().getValues();
+      const _headers      = _existingData[0] || [];
+      const _gCol         = _headers.indexOf("Gateway_Order_ID");
+      const _sidCol       = _headers.indexOf("Submission_ID");
+      if (_gCol !== -1 && _sidCol !== -1) {
+        const existingSids = [];
+        for (let r = 1; r < _existingData.length; r++) {
+          if (String(_existingData[r][_gCol] || "").trim() === gatewayOrderIdGuard) {
+            existingSids.push(String(_existingData[r][_sidCol] || "").trim());
+          }
+        }
+        if (existingSids.length > 0) {
+          console.log("submitOrder: idempotent skip — Gateway_Order_ID " + gatewayOrderIdGuard
+            + " already has " + existingSids.length + " row(s): " + existingSids.join(", "));
+          return {
+            success: true,
+            idempotent: true,
+            submissionIds: existingSids,
+            submissionId: existingSids[0],
+            message: "Order already recorded for this gateway transaction."
+          };
+        }
+      }
+    }
+    return _submitOrderInternal(body);
+  } finally {
+    try { submitLock.releaseLock(); } catch (_) {}
+  }
+}
+
+function _submitOrderInternal(body) {
+  const ss = getSpreadsheet();
+  const ordersWs = getOrCreateTab(ss, TAB_ORDERS, ORDERS_HEADERS);
+  const profile   = body.profile || {};
+  const orders    = body.orders  || [];
 
   const submittedAt  = getISTTimestamp();
   let   payMethod    = body.payment_method  || "UPI";
@@ -4156,6 +4224,39 @@ function getAnalytics(p) {
     archived:{count: archivedCount, included: archivedCount > 0}};
 }
 
+// ── ADMIN: VOID AN SK_ORDERS ROW ─────────────────────────────────────────────
+// Marks an order as void (e.g. duplicate, or marked Paid in error when
+// HDFC actually says AUTHORIZATION_FAILED). Doesn't delete — keeps the row
+// for audit. Sets Payment_Status to "Voided" and appends the reason to
+// Special_Notes_Kitchen for visibility.
+function voidOrderRow(submissionId, reason) {
+  if (!submissionId) return { success: false, error: "submissionId required" };
+  const ss = getSpreadsheet();
+  const ws = getOrCreateTab(ss, TAB_ORDERS, ORDERS_HEADERS);
+  const data = ws.getDataRange().getValues();
+  const headers = data[0] || [];
+  const sidCol     = headers.indexOf("Submission_ID");
+  const psCol      = headers.indexOf("Payment_Status");
+  const notesCol   = headers.indexOf("Special_Notes_Kitchen");
+  if (sidCol === -1) return { success: false, error: "Submission_ID column missing" };
+
+  for (let r = 1; r < data.length; r++) {
+    if (String(data[r][sidCol] || "").trim() === String(submissionId).trim()) {
+      const stamp  = Utilities.formatDate(new Date(), "Asia/Kolkata", "yyyy-MM-dd HH:mm");
+      const note   = "[VOIDED " + stamp + "] " + (reason || "Admin void");
+      const existingNote = String(data[r][notesCol] || "").trim();
+      const newNote = existingNote ? existingNote + " | " + note : note;
+
+      if (psCol !== -1)    ws.getRange(r + 1, psCol + 1).setValue("Voided");
+      if (notesCol !== -1) ws.getRange(r + 1, notesCol + 1).setValue(newNote);
+      SpreadsheetApp.flush();
+      console.log("voidOrderRow: " + submissionId + " voided. Reason: " + reason);
+      return { success: true, submissionId: submissionId, reason: reason };
+    }
+  }
+  return { success: false, error: "Submission_ID not found: " + submissionId };
+}
+
 // ── ADMIN WALLET CREDIT ───────────────────────────────────────────────────────
 function adminCreditWallet(body) {
   var phone  = String(body.phone || "").trim();
@@ -6934,15 +7035,52 @@ function hdfc_verifyReturnPayload(body) {
   // ── Step 2: Status API verification (authoritative) ──────────
   // Always call Status API — it gives us the real txn_id, confirmed status,
   // AND the actual charged amount (needed for post-payment tamper check).
+  //
+  // CRITICAL SECURITY FIX (UAT incident SK260513GDY384U1WM / SK260514G4BOVWUZ5V):
+  // Previously this function trusted the client-sent `status` field
+  // ("CHARGED" / "SUCCESS") if the Status API call failed (FETCH_ERROR,
+  // urlfetch quota etc.). That allowed a payment that HDFC ACTUALLY
+  // REJECTED to be marked Paid in our sheet, because the frontend
+  // hardcodes "CHARGED" in the popup-closed poll path.
+  //
+  // The fix: NEVER trust client-sent status. statusConfirmed can ONLY
+  // become true via:
+  //   (a) HDFC Status API returning confirmed = true, OR
+  //   (b) HMAC-verified ORDER_SUCCEEDED webhook in our SK_Webhook_Log,
+  //       which only gets logged after our own HMAC check in
+  //       hdfc_handleWebhook (so it's authoritative).
+  // If neither, we refuse to mark paid.
   const statusCheck = hdfc_getOrderStatus(orderId);
-  var statusConfirmed = (status === "CHARGED" || status === "SUCCESS");
+  var statusConfirmed = false;
+  var confirmedSource = "";
+
   if (statusCheck.confirmed) {
     statusConfirmed = true;
+    confirmedSource = "status-api";
     console.log("HDFC return: Status API confirmed CHARGED for " + orderId + " amount=" + statusCheck.amount);
-  } else if (!signatureOk) {
-    console.warn("HDFC return: Status API returned '" + statusCheck.status + "' for " + orderId);
-    if (!statusConfirmed) {
-      return { error: "Payment could not be verified. Status: " + statusCheck.status, paid: false };
+  } else {
+    // Fallback to our own webhook log (the ORDER_SUCCEEDED event from HDFC).
+    // This handles the case where Status API is transiently unavailable
+    // (e.g. urlfetch quota exhausted) but HDFC has already sent us a
+    // verified server-to-server confirmation.
+    var webhookProof = null;
+    try { webhookProof = _checkWebhookLogForCharge(orderId); } catch(_) {}
+    if (webhookProof) {
+      statusConfirmed = true;
+      confirmedSource = "webhook-log";
+      // Use the webhook's amount for the tamper check below (Status API is unavailable).
+      statusCheck.amount    = webhookProof.amount;
+      statusCheck.confirmed = true;
+      console.log("HDFC return: Status API unavailable (" + statusCheck.status + "), but ORDER_SUCCEEDED webhook found for " + orderId + " — trusting webhook.");
+    } else {
+      console.warn("HDFC return: Neither Status API nor webhook log confirm charge for " + orderId
+        + ". client_status='" + status + "' (IGNORED). statusApi='" + statusCheck.status + "'");
+      return {
+        error: "Payment could not be verified by HDFC. Status: " + statusCheck.status,
+        paid:  false,
+        client_status_ignored: true,
+        order_id: orderId
+      };
     }
   }
 
